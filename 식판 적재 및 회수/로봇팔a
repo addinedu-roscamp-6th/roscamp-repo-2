@@ -1,0 +1,133 @@
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Int32, Bool
+import time
+
+from pymycobot.mycobot280 import MyCobot280
+
+class RobotA1Node(Node):
+    def __init__(self):
+        super().__init__('robot_a1_node')
+
+        # MyCobot 연결
+        self.mc = MyCobot280('/dev/ttyJETCOBOT', 1000000)
+        self.mc.thread_lock = True
+        self.get_logger().info("🤖 JetCobot A 연결 완료")
+
+        # ✅ 퍼블리셔 및 서브스크라이버 생성
+        self.ready_pub = self.create_publisher(Bool, '/a_1_ready', 10)
+        self.done_pub = self.create_publisher(Bool, '/a_1_done', 10)
+        self.create_subscription(Int32, '/robot_a_1_node', self.step_callback, 10)
+
+        # ✅ 준비 신호 반복 발행 (0.5초마다)
+        self.create_timer(0.5, self.publish_ready)
+
+        # ✅ 완료 신호 재발행을 위한 타이머 (0.1초마다)
+        self.create_timer(0.1, self.publish_done_if_needed)
+
+        # ✅ 동작 재실행 감시 타이머 (2초마다)
+        self.create_timer(2.0, self.check_step_timeout)
+
+        # ✅ 초기 상태
+        self.step_done = False
+        self.executing_step = None
+        self.last_step_time = None
+
+        # ✅ 초기화
+        self.mc.send_angles([0, 0, 0, 0, 0, 0], 30)
+        self.mc.set_gripper_value(100, 30)
+        time.sleep(2)
+        self.get_logger().info("🔄 준비 자세 완료")
+
+        self.ready_log_printed = False
+
+        # ✅ 동작 테이블
+        self.action_map = {
+            101: [-30, 0, -70, -20, 0, 45, 100],
+            102: [0, 0, -150, 60, -60, 45, 100],
+            103: [0, 0, -150, 60, 0, 45, 0],
+            104: [0, 0, -40, -45, 0, 45, 0],
+            105: [0, -55, -47, 11, 0, 45, 0],
+            106: [0, -55, -47, 11, 0, 45, 100],
+            107: [0, 0, -40, -45, 0, 45, 0],
+            108: [0, 0, -150, 60, -60, 45, 100],
+            109: [0, 0, -150, 60, 0, 45, 0],
+            110: [0, 0, -40, -45, 0, 45, 0],
+            111: [0, -47, -48, 8, 0, 45, 100],
+            112: [-30, 0, -70, -20, 0, 45, 100],
+
+
+            201: [-30, 0, -70, -20, 0, 45, 100],    # 초기
+            202: [0, -47, -48, 8, -60, 45, 100],    # 식판1 위치
+            203: [0, -47, -48, 8, 0, 45, 0],        # 식판1 잡기
+            204: [0, 0, -40, -45, 0, 45, 0],        # 식판 들기
+            205: [-160, -47, -48, 8, 0, -45, 0],    # 회전
+            206: [-160, -47, -48, 8, -60, -45, 100], # 버리기
+            207: [0, 0, 0, -90, 0, 45, 100],        # 초기2
+            208: [0, -55, -47, 11, -60, 45, 100],   # 식판2 위치
+            209: [0, -55, -47, 11, 0, 45, 0],       # 식판2 잡기
+            210: [0, 0, -40, -45, 0, 45, 0],        # 들기
+            211: [-160, -47, -48, 8, 0, -45, 0],    # 회전
+            212: [-160, -47, -48, 8, -60, -45, 100], # 버리기
+            213: [-30, 0, -70, -20, 0, 45, 100],    # 초기
+        }
+
+    def publish_ready(self):
+        if not self.ready_log_printed:
+            self.get_logger().info("📡 준비 신호 발행 (/a_1_ready)")
+            self.ready_log_printed = True  # ✅ 이후부터 출력하지 않음
+        self.ready_pub.publish(Bool(data=True))
+
+
+    def step_callback(self, msg):
+        step = msg.data
+        if step == self.executing_step:
+            # 동일한 step 재수신 시 무시
+            return
+
+        self.executing_step = step
+        self.last_step_time = time.time()
+
+        if step in self.action_map:
+            angles = self.action_map[step]
+            self.get_logger().info(f"▶️ [A-1] Step {step} 동작 실행: {angles}")
+            try:
+                self.mc.send_angles(angles[:6], 30)
+                self.mc.set_gripper_value(angles[6], 30)
+                time.sleep(2)
+                self.get_logger().info(f"✅ [A-1] Step {step} 완료")
+                self.step_done = True
+            except Exception as e:
+                self.get_logger().error(f"❌ Step {step} 실패: {e}")
+        else:
+            self.get_logger().warn(f"⚠️ Step {step}은 A가 수행할 수 없음")
+            self.step_done = True
+
+    def publish_done_if_needed(self):
+        if self.step_done:
+            self.done_pub.publish(Bool(data=True))
+            self.get_logger().info("📤 완료 신호 전송 (/a_1_done)")
+            self.step_done = False
+            self.executing_step = None
+            self.last_step_time = None
+
+    def check_step_timeout(self):
+        if self.executing_step is not None and self.last_step_time is not None:
+            elapsed = time.time() - self.last_step_time
+            if elapsed > 5.0:
+                self.get_logger().warn(f"⏱️ Step {self.executing_step} 타임아웃 발생 → 강제 재실행")
+                # 재실행 시도
+                self.step_callback(Int32(data=self.executing_step))  # 재전송
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = RobotA1Node()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
