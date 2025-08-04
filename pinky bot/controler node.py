@@ -7,7 +7,7 @@ from geometry_msgs.msg import PoseStamped, PointStamped, Twist
 YAW_THRESHOLD_DEG = 5.0       # 허용 오차 (deg)
 ROTATE_SPEED_DEG  = 17.0      # 회전 속도 (deg/s)
 LINEAR_SPEED      = 0.1       # 직진 속도 (m/s)
-GOAL_TOLERANCE    = 0.05      # 목표 도달 거리 (m)
+GOAL_TOLERANCE    = 0.1      # 목표 도달 거리 (m)
 # 내부 연산용 (도 → 라디안)
 YAW_THRESHOLD = math.radians(YAW_THRESHOLD_DEG)
 ROTATE_SPEED  = math.radians(ROTATE_SPEED_DEG)
