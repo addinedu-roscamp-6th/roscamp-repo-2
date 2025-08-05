@@ -373,8 +373,7 @@ def to_marker(mc, do_calib=True):
 
         print(f"[현재 J6] = {prev_j6:.1f}° → [회전 목표] = {target_j6:.1f}°")
 
-        angles[5] = target_j6
-        mc.send_angles(angles, speed=SLOW_SPEED)
+        mc.send_angle(6, target_j6, SLOW_SPEED)
         time.sleep(2)
 
     except Exception as e:
