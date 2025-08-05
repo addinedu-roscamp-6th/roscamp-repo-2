@@ -389,6 +389,8 @@ def to_marker(mc, do_calib=True):
         if ans == 'y':
             DT = DT_new
             save_calib()
+ 
+        
 
 
 def menu_calibrate():
@@ -415,13 +417,13 @@ def menu_calibrate():
 def menu_verify_basic():
     print("=== 검증: 기본 포즈 ===")
     mc = MyCobot280('/dev/ttyJETCOBOT', 1000000); mc.thread_lock = True
-    mc.send_angles(BASIC_POSE, FAST_SPEED); time.sleep(0.5)
+    mc.send_angles(BASIC_POSE, FAST_SPEED); time.sleep(0.5); mc.set_gripper_value(100, 50)
     to_marker(mc, do_calib=False)
 
 def menu_verify_pose2():
     print("=== 검증: 포즈2 ===")
     mc = MyCobot280('/dev/ttyJETCOBOT', 1000000); mc.thread_lock = True
-    mc.send_angles(POSE2, FAST_SPEED); time.sleep(0.5)
+    mc.send_angles(POSE2, FAST_SPEED); time.sleep(0.5); mc.set_gripper_value(100, 50)
     to_marker(mc, do_calib=False)
 
 def menu_adjust():
