@@ -228,94 +228,150 @@ class ArucoCarControl:
         except ValueError:
             self.safe_update_label(self.status_label, "Error: Invalid input")
 
-
-
-
-
-
-
-
     def navigate(self):
-        """改进后的导航算法，解决摇晃问题"""
-        # 优化后的控制参数
-        BASE_SPEED = 20       # 降低基础速度
-        MIN_SPEED = 10        # 最小速度
-        TURN_GAIN = 0.3       # 降低转向增益
-        ANGLE_TOLERANCE = 5   # 角度容差(度)
-        DISTANCE_TOLERANCE = 25 # 距离容差(像素)
-        SLOWDOWN_START = 200  # 开始减速的距离(像素)
-        STOP_TIME = 1.0       # 到达后确认时间(秒)
-        DAMPING_FACTOR = 0.7  # 阻尼系数
+        """导航到目标位置的核心算法"""
+        # 控制参数：定义基本速度
+        BASE_SPEED = 30
+        # 控制参数：定义最小速度
+        MIN_SPEED = 20
+        # 控制参数：转向增益，用于控制转向力度
+        TURN_GAIN = 0.3
+        # 控制参数：角度阈值，决定是否需要大幅转向
+        ANGLE_THRESHOLD = 15
+        # 控制参数：减速距离，接近目标时开始减速
+        SLOWDOWN_DIST = 200
+        # 控制参数：停止距离，到达目标的判定距离
+        STOP_DIST = 15
+        # 控制参数：停止时间，确认到达目标后等待时间
+        STOP_TIME = 1.0
+        # 控制参数：卡死检测阈值，判断车辆是否卡住
+        STUCK_THRESHOLD = 15
+        # 控制参数：角度平滑因子，用于平滑角度变化
+        ANGLE_SMOOTHING = 0.6
+        # 控制参数：网格坐标容差，用于判断是否到达目标网格
+        GRID_TOLERANCE = 0.5  # 网格坐标容差
+        # 频闪摆脱参数：快速转向时间（缩短）
+        FLICKER_TURN_DURATION = 0.05
+        # 频闪摆脱参数：快速转向力度（减小）
+        FLICKER_TURN_SPEED = 30
         
-        # 状态变量
-        last_angle_diff = 0
+        # 方向修正系数：用于修正车头方向
+        DIRECTION_CORRECTION = -1
+        
+        # 初始化卡死计数器
+        stuck_count = 0
+        # 初始化停止开始时间
         stop_start_time = None
+        # 初始化前一次角度
+        prev_angle = 0
         
+        # 主循环：当程序运行且有目标位置时持续执行
         while self.running and self.target:
+            # 使用锁确保线程安全
             with self.lock:
+                # 检查车辆位置和朝向是否有效，若无效则等待
                 if self.car_position is None or self.car_heading is None:
                     time.sleep(0.1)
                     continue
                     
-                # 获取当前位置和目标位置
+                # 获取当前位置坐标
                 cx, cy = self.car_position
-                heading = self.car_heading
+                # 获取并修正车头朝向
+                heading = self.car_heading * DIRECTION_CORRECTION
+                # 获取目标位置坐标
                 tx, ty = self.target
+                # 将当前像素坐标转换为网格坐标
+                grid_x, grid_y = self.pixel_to_grid(cx, cy)
                 
-                # 转换为像素坐标
-                px_target, py_target = self.grid_to_pixel(tx, ty)
+                # 第一阶段：沿X轴移动到目标X坐标
+                if abs(grid_x - tx) > GRID_TOLERANCE:
+                    # 将目标网格坐标转换为像素坐标
+                    px_target, py_target = self.grid_to_pixel(tx, grid_y)
+                    # 更新状态标签，显示当前目标
+                    self.safe_update_label(self.status_label, f"Moving to X: ({tx}, {grid_y})")
+                # 第二阶段：沿Y轴移动到目标Y坐标
+                else:
+                    # 将目标网格坐标转换为像素坐标
+                    px_target, py_target = self.grid_to_pixel(tx, ty)
+                    # 更新状态标签，显示当前目标
+                    self.safe_update_label(self.status_label, f"Moving to Y: ({tx}, {ty})")
+                
+                # 计算从当前位置到目标位置的向量
                 target_vec = np.array([px_target - cx, py_target - cy])
+                # 计算到目标的距离
                 distance = np.linalg.norm(target_vec)
                 
-                # 到达判定
-                if distance < DISTANCE_TOLERANCE:
+                # 到达判定：检查是否足够接近目标
+                if distance < STOP_DIST:
+                    # 如果刚进入停止范围，记录开始时间
                     if stop_start_time is None:
                         stop_start_time = time.time()
+                    # 如果停止时间超过阈值，停止车辆
                     elif time.time() - stop_start_time > STOP_TIME:
                         self._stop_car()
-                        self.safe_update_label(self.status_label, f"精确到达: ({tx}, {ty})")
+                        # 更新状态标签，显示已到达目标
+                        self.safe_update_label(self.status_label, f"Arrived at: ({tx}, {ty})")
                         break
                     continue
-                
-                # 计算角度差
-                angle_diff = self.angle_between(heading, target_vec)
-                
-                # 添加阻尼项 (减少振荡)
-                damping = DAMPING_FACTOR * (angle_diff - last_angle_diff)
-                last_angle_diff = angle_diff
-                
-                # 动态速度控制
-                if distance < SLOWDOWN_START:
-                    speed = BASE_SPEED * (0.3 + 0.7 * (distance / SLOWDOWN_START))
                 else:
-                    speed = BASE_SPEED
-                speed = max(MIN_SPEED, speed)
+                    # 重置停止时间
+                    stop_start_time = None
                 
-                # 转向控制 (更平滑)
-                if abs(angle_diff) > ANGLE_TOLERANCE:
-                    turn = TURN_GAIN * (angle_diff + damping)
-                    turn = np.clip(turn, -30, 30)  # 限制最大转向
+                # 计算当前朝向与目标方向的角度差
+                angle = self.angle_between(heading, target_vec)
+                # 平滑角度变化，结合前一次角度
+                angle = ANGLE_SMOOTHING * angle + (1 - ANGLE_SMOOTHING) * prev_angle
+                # 更新前一次角度
+                prev_angle = angle
+                
+                # 转向控制：如果角度差较大，减速并大幅转向
+                if abs(angle) > ANGLE_THRESHOLD:
+                    speed = MIN_SPEED
+                    # 计算转向量，限制最大转向角度为45度
+                    turn = np.sign(angle) * TURN_GAIN * min(45, abs(angle))
                 else:
-                    turn = 0
+                    # 正常行驶，速度根据距离调整
+                    speed = BASE_SPEED * min(1, distance/SLOWDOWN_DIST)
+                    # 确保速度不低于最小值
+                    speed = max(MIN_SPEED, speed)
+                    # 计算转向量
+                    turn = TURN_GAIN * angle
                 
-                # 计算电机PWM值
-                left_pwm = int(np.clip(speed - turn, -50, 50))
-                right_pwm = int(np.clip(speed + turn, -50, 50))
+                # 计算左右电机PWM值，控制车辆运动
+                left_pwm = int(np.clip(speed - turn, -60, 60))
+                right_pwm = int(np.clip(speed + turn, -60, 60))
                 
-                # 发送移动命令
+                # 卡死检测：当左右电机PWM差值较大且距离目标较远时
+                if abs(left_pwm - right_pwm) > 40 and distance > STOP_DIST*2:
+                    stuck_count += 1
+                    # 如果卡死计数超过阈值，执行频闪摆脱动作
+                    if stuck_count > STUCK_THRESHOLD:
+                        # 快速左转
+                        self.send_command("move", -FLICKER_TURN_SPEED, FLICKER_TURN_SPEED)
+                        time.sleep(FLICKER_TURN_DURATION)
+                        # 快速右转
+                        self.send_command("move", FLICKER_TURN_SPEED, -FLICKER_TURN_SPEED)
+                        time.sleep(FLICKER_TURN_DURATION)
+                        # 停止以稳定
+                        self.send_command("move", 0, 0)
+                        # 重置卡死计数
+                        stuck_count = 0
+                        continue
+                else:
+                    # 减少卡死计数
+                    stuck_count = max(0, stuck_count-1)
+                
+                # 发送移动命令到车辆
                 self.send_command("move", left_pwm, right_pwm)
             
-            time.sleep(0.1)
-
-
-
-
+            # 控制循环频率
+            time.sleep(0.01)
 
 
     def on_closing(self):
         """处理窗口关闭事件"""
         self.running = False
-        time.sleep(0.2)  # 给线程时间退出
+        time.sleep(0.2)
         self.root.destroy()
 
     def cleanup(self):
