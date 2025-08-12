@@ -1,0 +1,141 @@
+import time, threading
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from std_msgs.msg import Int32
+from pymycobot.mycobot280 import MyCobot280
+
+class RobotB1Node(Node):
+    def __init__(self):
+        super().__init__('robot_b_1_node')
+
+        # QoS
+        self.qos1 = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+        # HW
+        self.mc = MyCobot280('/dev/ttyJETCOBOT', 1000000)
+        self.mc.thread_lock = True
+        self.get_logger().info("🤖 JetCobot B 연결 완료")
+
+        # 상태
+        self.step_running = threading.Event()
+        self.waiting_barrier = False
+        self.executing_step = None
+        self.pending_step = None
+        self.last_step_time = None
+        self.worker_thread = None
+        self.step_done = False
+
+        # Pub/Sub
+        self.done_pub = self.create_publisher(Int32, '/b_1_done', self.qos1)
+        self.ready_pub = self.create_publisher(Int32, '/b_ready_step', self.qos1)
+        self.create_subscription(Int32, '/robot_b_1_node', self.step_callback, self.qos1)
+        self.create_subscription(Int32, '/go_step', self.go_callback, self.qos1)
+
+        # 타이머
+        self.create_timer(0.3, self.tick_timeout)
+
+        # 동작 맵
+        self.action_map = {
+            101: [0, 0, -70, -20, 0, 45, 100],
+            102:"NOP",
+            103: [0, 40, -130, 0, -60, 45, 100],
+            104: [0, 40, -130, 0, -10, 45, 100],
+            105: [0, 40, -130, 0, -10, 45, 0],
+            106: [0, 0, -40, -48, -10, 45, 0],
+            107: [0, -27, -67, 4, -10, 45, 0],
+            108: [0, -27, -67, 4, -10, 45, 100],
+            109: [0, 0, -40, -48, -10, 45, 100],
+            110:"NOP",
+            111: [0, 40, -130, 0, -60, 45, 100],
+            112: [0, 40, -130, 0, -10, 45, 100],
+            113: [0, 40, -130, 0, -10, 45, 0],
+            114: [0, 0, -40, -48, -10, 45, 0],
+            115: [0, -22, -67, -5, -10, 45, 0],
+            116: [0, -22, -67, -5, -10, 45, 100],
+            117: [0, 0, -70, -20, 0, 45, 100],
+
+
+            201: [0, 0, -70, -20, 0, 45, 100],
+            202: [0, -20, -60, -5, -60, 45, 100],
+            203: [0, -20, -60, -5, -10, 45, 100],
+            204: [0, -20, -60, -5, -10, 45, 0],
+            205: [0, 0, -40, -48, -10, 45, 0],
+            206: [0, 40, -130, 0, -10, 45, 0],
+            207: [0, 40, -130, 0, -10, 45, 100],
+            208: [0, -25, -65, -5, -60, 45, 100],
+            209: [0, -25, -65, -5, -10, 45, 100],
+            210: [0, -25, -65, -5, -10, 45, 0],
+            211: [0, 0, -40, -48, -10, 45, 0],
+            212: [0, 40, -130, 0, -10, 45, 0],
+            213: [0, 40, -130, 0, -10, 45, 100],
+            214: [0, 0, -70, -20, 0, 45, 100],
+        }
+
+    # ────────────────────────────── 배리어 프로토콜
+    def step_callback(self, msg):
+        step = int(msg.data)
+
+        if self.step_running.is_set() or self.waiting_barrier:
+            if step != self.executing_step:
+                self.pending_step = step
+                self.get_logger().warn(f"🧺 실행/대기 중({self.executing_step}) → Step {step} 큐잉")
+            return
+
+        self.executing_step = step
+        self.step_done = False
+        self.last_step_time = time.time()
+        self.waiting_barrier = True
+        self.ready_pub.publish(Int32(data=step))
+        self.get_logger().info(f"🟡 READY 전송: {step} (GO 대기)")
+
+    def go_callback(self, msg):
+        go = int(msg.data)
+        if self.waiting_barrier and go == self.executing_step:
+            self.waiting_barrier = False
+            self.step_running.set()
+            self.worker_thread = threading.Thread(target=self.execute_step, args=(go,), daemon=True)
+            self.worker_thread.start()
+
+    def execute_step(self, step):
+        angles = self.action_map[step]
+        try:
+            self.mc.send_angles(angles[:6], 30)
+            self.mc.set_gripper_value(angles[6], 30)
+            time.sleep(2)
+            self.step_done = True
+            self.get_logger().info(f"✅ Step {step} 완료")
+        except Exception as e:
+            self.step_done = False
+            self.get_logger().error(f"❌ Step {step} 실패: {e}")
+        finally:
+            self.step_running.clear()
+            self.done_pub.publish(Int32(data=int(step)))
+            self.executing_step = None
+            if self.pending_step is not None:
+                nxt = self.pending_step; self.pending_step = None
+                self.step_callback(Int32(data=nxt))
+
+    def tick_timeout(self):
+        if self.waiting_barrier and self.executing_step is not None:
+            if time.time() - self.last_step_time > 3.0:
+                self.ready_pub.publish(Int32(data=int(self.executing_step)))
+                self.last_step_time = time.time()
+                self.get_logger().warn(f"⏳ READY 재전송: {self.executing_step}")
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = RobotB1Node()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
