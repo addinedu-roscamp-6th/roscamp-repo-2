@@ -1,0 +1,157 @@
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from std_msgs.msg import Int32, Bool
+import time
+
+class CoordinatorNode(Node):
+    def __init__(self):
+        super().__init__('coordinator_node')
+
+        # QoS
+        self.qos1 = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1,
+        )
+
+        # 상태
+        self.current_step = None
+        self.step_list = []
+        self.idx = 0
+
+        # READY/DONE 상태
+        self.a_ready = -1
+        self.b_ready = -1
+        self.a_done = -1
+        self.b_done = -1
+        self.waiting_ready = False
+
+        # 타임스탬프 (재전송)
+        self.last_step_sent = 0.0
+        self.last_go_sent = 0.0
+
+        # 구독
+        self.create_subscription(Int32, '/a_1_done', self.cb_a_done, self.qos1)
+        self.create_subscription(Int32, '/b_1_done', self.cb_b_done, self.qos1)
+        self.create_subscription(Int32, '/a_ready_step', self.cb_a_ready, self.qos1)
+        self.create_subscription(Int32, '/b_ready_step', self.cb_b_ready, self.qos1)
+
+        # 발행
+        self.pub_a = self.create_publisher(Int32, '/robot_a_1_node', self.qos1)
+        self.pub_b = self.create_publisher(Int32, '/robot_b_1_node', self.qos1)
+        self.pub_go = self.create_publisher(Int32, '/go_step', self.qos1)
+
+        # 타이머: 재전송/상태 전개
+        self.create_timer(0.2, self.tick)
+
+        # 메뉴
+        self.choose_function()
+
+    # ─────────────────────────────────────────
+    def choose_function(self):
+        print("\n🌟 기능을 선택하세요:")
+        print("  1. 식판 적재 (101~113)")
+        print("  2. 식판 회수 (201~210)")
+        while True:
+            try:
+                option = int(input("▶ 기능 번호 입력: "))
+                if option == 1:
+                    # 113 포함
+                    self.step_list = list(range(101, 118))
+                    break
+                elif option == 2:
+                    # 210 포함
+                    self.step_list = list(range(201, 215))
+                    break
+                else:
+                    print("⚠️ 1 또는 2만 입력하세요.")
+            except Exception:
+                print("⚠️ 숫자를 입력하세요.")
+
+        self.idx = 0
+        self.start_step()
+
+    def start_step(self):
+        self.current_step = self.step_list[self.idx]
+        self.a_ready = self.b_ready = -1
+        self.a_done  = self.b_done  = -1
+        self.waiting_ready = True
+        self.send_step()
+
+    def send_step(self):
+        msg = Int32(data=int(self.current_step))
+        self.pub_a.publish(msg)
+        self.pub_b.publish(msg)
+        self.last_step_sent = time.time()
+        self.get_logger().info(f"📤 STEP {self.current_step} 전송 → A, B")
+
+    # ─────────────────────────────────────────
+    # 콜백
+    def cb_a_ready(self, msg):
+        self.a_ready = int(msg.data)
+
+    def cb_b_ready(self, msg):
+        self.b_ready = int(msg.data)
+
+    def cb_a_done(self, msg):
+        self.a_done = int(msg.data)
+        self.get_logger().info(f"✅ A DONE: {self.a_done}")
+
+    def cb_b_done(self, msg):
+        self.b_done = int(msg.data)
+        self.get_logger().info(f"✅ B DONE: {self.b_done}")
+
+    # ─────────────────────────────────────────
+    # 메인 루프(재전송/전개)
+    def tick(self):
+        if self.current_step is None:
+            return
+
+        now = time.time()
+
+        # 1) READY 배리어
+        if self.waiting_ready:
+            # 둘 다 현재 step에 대해 READY 되었으면 GO 발행
+            if self.a_ready == self.current_step and self.b_ready == self.current_step:
+                self.pub_go.publish(Int32(data=int(self.current_step)))
+                self.last_go_sent = now
+                self.waiting_ready = False
+                self.get_logger().info(f"🚦 GO {self.current_step} 발행(동시 시작)")
+                return
+
+            # STEP 재전송 (유실 대비)
+            if now - self.last_step_sent > 0.5:
+                self.send_step()
+            return
+
+        # 2) 실행 중 → DONE 대기
+        if self.a_done == self.current_step and self.b_done == self.current_step:
+            self.get_logger().info(f"🎉 STEP {self.current_step} 모두 완료")
+            self.idx += 1
+            if self.idx >= len(self.step_list):
+                self.get_logger().info("🏁 모든 STEP 완료. 기능 선택으로 돌아갑니다.")
+                self.current_step = None
+                time.sleep(0.5)
+                self.choose_function()
+            else:
+                self.start_step()
+            return
+
+        # GO 재전송 (유실 대비)
+        if now - self.last_go_sent > 0.7:
+            self.pub_go.publish(Int32(data=int(self.current_step)))
+            self.last_go_sent = now
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = CoordinatorNode()
+    try:
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        print("\n[중단됨]")
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
