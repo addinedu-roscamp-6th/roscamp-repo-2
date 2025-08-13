@@ -5,7 +5,7 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from std_msgs.msg import Int32
+from std_msgs.msg import Int32, Bool
 from flask import Flask, Response
 from pymycobot.mycobot280 import MyCobot280
 
@@ -77,11 +77,18 @@ class RobotA1Node(Node):
         self.worker_thread = None
         self.step_done = False
 
+        # 일시정지 플래그
+        self._pause_event = threading.Event()
+
         # Pub/Sub
         self.done_pub = self.create_publisher(Int32, '/a_1_done', self.qos1)
         self.ready_pub = self.create_publisher(Int32, '/a_ready_step', self.qos1)
         self.create_subscription(Int32, '/robot_a_1_node', self.step_callback, self.qos1)
         self.create_subscription(Int32, '/go_step', self.go_callback, self.qos1)
+
+        # ⬇️ 추가: 일시정지/준비자세 명령 구독
+        self.create_subscription(Bool, '/a_pause', self.pause_callback, self.qos1)
+        self.create_subscription(Bool, '/a_move_ready', self.move_ready_callback, self.qos1)
 
         # 타이머
         self.create_timer(0.3, self.tick_timeout)
@@ -99,7 +106,10 @@ class RobotA1Node(Node):
         self.SLOW_SPEED = 12
         self.BLEND_MODE = 1
 
+        # 기존 기본 포즈 (CODE1 시 사용)
         self.BASIC_POSE = [0, 55, -90, -55, 6, -45]
+        # ⬇️ 준비 자세(요청값)
+        self.READY_POSE = [0, 0, -70, -20, 0, 45, 100]
 
         # 동작 맵 (101/201: 이동 후 마커 1초 안정 대기)
         self.action_map = {
@@ -165,17 +175,54 @@ class RobotA1Node(Node):
         self._marker_anchor_t = None
         self._marker_anchor_ts = None
 
-        self._pos_eps = 3.0          # 안정 판정 허용 오차(mm)
-        self._pos_eps_reset = 8.0    # 이 이상 움직여야 앵커 리셋
-        self._filter_alpha = 0.35    # EMA 가중치 (0.3~0.5 추천)
-        self._tvec_filt = None       # EMA 상태
+        self._pos_eps = 3.0
+        self._pos_eps_reset = 8.0
+        self._filter_alpha = 0.35
+        self._tvec_filt = None
 
-        self._stable_time_needed = 1.0  # 기본 안정시간 1초
+        self._stable_time_needed = 1.0
 
         # 카메라 스레드 시작 + 웹 서버
         self._cam_thread = threading.Thread(target=self._camera_loop, daemon=True)
         self._cam_thread.start()
         start_web()
+
+    # ───────── 일시정지/준비자세 콜백 ─────────
+    def pause_callback(self, msg: Bool):
+        if msg.data:
+            self.get_logger().warn("⏸ 일시정지 수신: 현재 동작 정지")
+            self._pause_event.set()
+            try:
+                self.mc.stop()
+            except Exception:
+                pass
+        else:
+            self.get_logger().info("▶ 재개 수신")
+            self._pause_event.clear()
+
+    def move_ready_callback(self, msg: Bool):
+        if msg.data:
+            self.get_logger().info("🟦 준비자세 이동 명령 수신")
+            threading.Thread(target=self._move_to_ready_safe, daemon=True).start()
+
+    def _wait_if_paused(self):
+        while self._pause_event.is_set():
+            time.sleep(0.05)
+
+    def _move_to_ready_safe(self):
+        try:
+            # 일시정지 중에도 안전하게 준비자세로 이동 (정지 → 준비자세)
+            try:
+                self.mc.stop()
+            except Exception:
+                pass
+            angles = self.READY_POSE[:6]
+            grip = self.READY_POSE[6]
+            self.mc.send_angles(angles, self.FAST_SPEED); time.sleep(0.6)
+            self.mc.set_gripper_value(grip, 40); time.sleep(0.4)
+            self.get_logger().info(f"✅ 준비자세 이동 완료: {self.READY_POSE}")
+        except Exception as e:
+            self.get_logger().error(f"❌ 준비자세 이동 실패: {e}")
 
     # ───────── 카메라 루프 (항상 실행) ─────────
     def _camera_loop(self):
@@ -205,7 +252,7 @@ class RobotA1Node(Node):
                     marker_on = True
                     t = tvec.flatten().astype(float)
 
-                    # ── ① tvec 저역통과(EMA) 필터
+                    # EMA 필터
                     if self._tvec_filt is None:
                         self._tvec_filt = t.copy()
                     else:
@@ -213,26 +260,24 @@ class RobotA1Node(Node):
                     t_use = self._tvec_filt
 
                     with self._marker_lock:
-                        # ── ② 히스테리시스: 작은 흔들림 무시, 큰 이동만 리셋
+                        # 히스테리시스
                         if self._marker_anchor_t is None:
                             self._marker_anchor_t = t_use.copy()
                             self._marker_anchor_ts = time.time()
                         else:
                             dev = np.linalg.norm(t_use - self._marker_anchor_t)
                             if dev <= self._pos_eps:
-                                pass  # 안정 유지
+                                pass
                             elif dev >= self._pos_eps_reset:
                                 self._marker_anchor_t = t_use.copy()
                                 self._marker_anchor_ts = time.time()
                             else:
-                                pass  # 데드밴드 영역: 기준 유지
+                                pass
 
                         self._marker_seen = True
                         self._marker_last_rvec = rvec
-                        # 후속 계산에서 사용하려고 필터링된 tvec을 저장
                         self._marker_last_tvec = t_use.reshape(3, 1)
 
-                    # 시각화
                     cv2.polylines(fr, [imgp.astype(int)], True, (0, 255, 255), 2)
                     try:
                         cv2.drawFrameAxes(fr, self.CAM_MTX, self.DIST_COEFFS, rvec, tvec, self.MARKER_LEN*0.7)
@@ -244,11 +289,9 @@ class RobotA1Node(Node):
                     self._marker_anchor_t = None
                     self._marker_anchor_ts = None
 
-            # 중앙 십자
+            # 중앙 십자 & 상태
             h, w = fr.shape[:2]
             cv2.drawMarker(fr, (w//2, h//2), (0,255,0), cv2.MARKER_CROSS, 20, 2)
-
-            # 상태 텍스트
             with self._marker_lock:
                 if self._marker_seen and self._marker_anchor_ts is not None:
                     stable_sec = time.time() - self._marker_anchor_ts
@@ -259,7 +302,6 @@ class RobotA1Node(Node):
             cv2.putText(fr, status, (10,22), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
                         (0,255,0) if marker_on else (0,0,255), 2, cv2.LINE_AA)
 
-            # 최신 프레임 갱신
             with _frame_lock:
                 _latest_frame = fr
 
@@ -267,15 +309,15 @@ class RobotA1Node(Node):
 
     # ───────── (백그라운드) 마커 안정 대기 ─────────
     def wait_marker_stable(self, still_time=1.0, pos_eps=None, timeout=10.0):
-        """마커가 still_time 동안 안정되면 True, 아니면 False"""
         t0 = time.time()
         self._stable_time_needed = still_time
         old_eps = self._pos_eps
         if pos_eps is not None:
-            self._pos_eps = float(pos_eps)  # 일시적으로 안정 오차 변경
-
+            self._pos_eps = float(pos_eps)
         try:
             while time.time() - t0 <= timeout:
+                # 일시정지 중에는 카운트 중단
+                self._wait_if_paused()
                 with self._marker_lock:
                     seen = self._marker_seen
                     t_anchor = self._marker_anchor_ts
@@ -285,7 +327,7 @@ class RobotA1Node(Node):
                 time.sleep(0.05)
             return False
         finally:
-            self._pos_eps = old_eps  # 원복
+            self._pos_eps = old_eps
 
     # ───────── 유틸 ─────────
     @staticmethod
@@ -304,19 +346,17 @@ class RobotA1Node(Node):
 
     # ───────── CODE1 핵심 (백그라운드 검출 사용) ─────────
     def to_marker_basic(self):
-        # 1) 마커 1초 안정 대기 (허용오차는 클래스 기본값 사용)
+        self._wait_if_paused()
         ok = self.wait_marker_stable(still_time=1.0, pos_eps=None, timeout=20.0)
         if not ok:
             raise RuntimeError("마커 안정 대기(1.0s) 실패")
 
-        # 2) 최신 rvec, tvec
         with self._marker_lock:
             rvec = None if self._marker_last_rvec is None else self._marker_last_rvec.copy()
             tvec = None if self._marker_last_tvec is None else self._marker_last_tvec.copy()
         if rvec is None or tvec is None:
             raise RuntimeError("마커 포즈 없음")
 
-        # 3) 마커 중심으로 이동
         tvec = tvec.flatten()
         tvec_fixed = np.array([ round(-tvec[1],1), round(-tvec[0],1), round(tvec[2],1) ])
 
@@ -334,10 +374,10 @@ class RobotA1Node(Node):
         target_coords = current_coords + delta + correction_offset
         target_coords[2] = 170.0
 
+        self._wait_if_paused()
         self.mc.send_coords(target_coords.tolist() + ori, speed=self.SLOW_SPEED, mode=self.BLEND_MODE)
         time.sleep(5)
 
-        # 4) J6 임시 회전 → 그리퍼 닫기(0) → J6 원위치
         try:
             rmat, _ = cv2.Rodrigues(rvec)
             rz = np.degrees(np.arctan2(rmat[1,0], rmat[0,0]))
@@ -352,31 +392,45 @@ class RobotA1Node(Node):
                 j6_saved = float(angles[5])
                 j6_temp  = self.clamp(round(j6_saved + rz_offset, 1), -180.0, 180.0)
 
-                self.get_logger().info(f"J6 저장={j6_saved:.1f}° → 일시 회전={j6_temp:.1f}° (오프셋 {rz_offset:+.1f}°)")
+                self._wait_if_paused()
                 self.mc.send_angle(6, j6_temp, self.SLOW_SPEED); time.sleep(1.2)
 
-                self.mc.set_gripper_value(0, 50); time.sleep(0.5)   # 그리퍼 닫기
-                self.get_logger().info(f"J6 복귀 → {j6_saved:.1f}°")
+                self._wait_if_paused()
+                self.mc.set_gripper_value(0, 50); time.sleep(0.5)
+
+                self._wait_if_paused()
                 self.mc.send_angle(6, j6_saved, self.SLOW_SPEED); time.sleep(1.0)
         except Exception as e:
             self.get_logger().warn(f"J6 일시 회전/복귀 처리 실패: {e}")
 
-        # 5) 최종 자세 시퀀스
         try:
+            self._wait_if_paused()
             final_angles = [0, 40, -130, 0, 6, -45]
             self.mc.send_angles(final_angles, self.FAST_SPEED); time.sleep(0.7)
+
+            self._wait_if_paused()
             self.mc.send_angle(5, 0, self.FAST_SPEED); time.sleep(0.5)
+
+            self._wait_if_paused()
             self.mc.set_gripper_value(100, 50); time.sleep(0.5)
+
+            self._wait_if_paused()
             self.mc.send_angle(6, 45, self.FAST_SPEED); time.sleep(0.5)
+
+            self._wait_if_paused()
             self.mc.send_angle(5, -60, self.FAST_SPEED); time.sleep(0.5)
+
             self.get_logger().info("📌 최종 자세 [0,40,-130,0,6,-45] → J5=0 → 그리퍼=100 → J6=45 → J5=-60 완료")
         except Exception as e:
             self.get_logger().error(f"최종 자세 이동 실패: {e}")
 
     def run_code1_feature(self):
         self.get_logger().info("🧩 코드1 기능 실행 시작")
+        self._wait_if_paused()
         self.mc.send_angles(self.BASIC_POSE, self.FAST_SPEED); time.sleep(0.5)
+        self._wait_if_paused()
         self.mc.set_gripper_value(100, 50); time.sleep(0.3)
+        self._wait_if_paused()
         self.to_marker_basic()
         self.get_logger().info("🧩 코드1 기능 완료")
 
@@ -426,11 +480,12 @@ class RobotA1Node(Node):
     def execute_step(self, step):
         angles = self.action_map[step]
         try:
-            # 1) 각도/그리퍼 실행
+            self._wait_if_paused()
             self.mc.send_angles(angles[:6], 30)
+
+            self._wait_if_paused()
             self.mc.set_gripper_value(angles[6], 30)
 
-            # 2) 101 / 201: 마커 1초 안정 대기 (클래스 기본 오차 사용)
             if step in (101, 201):
                 self.get_logger().info(f"🔍 Step {step}: 마커 1.0s 안정 대기 시작")
                 ok = self.wait_marker_stable(still_time=1.0, pos_eps=None, timeout=15.0)
