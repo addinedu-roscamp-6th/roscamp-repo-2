@@ -1,0 +1,90 @@
+topics:
+  /pinky1/marker_map/ID25:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 55
+    remap: /marker_map/ID25
+  /go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+  /pinky1/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+  /pinky1/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+  /pinky1/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+  /pinky1/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+  # (옵션) 로봇→PC 모니터링
+  # cmd_vel:
+  #    type: geometry_msgs/msg/Twist
+  #    from_domain: 55
+  #    to_domain: 10
+  #    remap: pinky1/cmd_vel
+  /pinky2/marker_map/ID26:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 8
+    remap: /marker_map/ID26
+  /pinky2/go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+  /pinky2/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+  /pinky2/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+  /pinky2/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+  /pinky2/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+  #/pinky2/cmd_vel:
+   #  type: geometry_msgs/msg/Twist
+    # from_domain: 8
+     #to_domain: 10
+  /pinky3/marker_map/ID27:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 9
+    remap: /marker_map/ID27
+  /pinky3/go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+  /pinky3/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+  /pinky3/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+  /pinky3/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+  /pinky3/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+  #/pinky3/cmd_vel:
+   #  type: geometry_msgs/msg/Twist
+    # from_domain: 9
+     #to_domain: 10
