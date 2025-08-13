@@ -1,0 +1,132 @@
+#!/usr/bin/env python3
+import rclpy
+import math
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, Point, Twist
+from std_msgs.msg import Bool
+from collections import deque
+# 외부 경로 불러오기
+from pinky_controller.goal_points import GOAL_PATHS  # 실제 패키지명으로 바꿔줘
+# 사용자 설정값
+YAW_THRESHOLD_DEG = 7.0
+ROTATE_SPEED_DEG  = 0.1
+LINEAR_SPEED      = 0.1
+GOAL_TOLERANCE    = 0.1
+# 라디안 변환
+YAW_THRESHOLD = math.radians(YAW_THRESHOLD_DEG)
+ROTATE_SPEED  = math.radians(ROTATE_SPEED_DEG)
+def normalize_angle(angle):
+    while angle > math.pi:
+        angle -= 2.0 * math.pi
+    while angle < -math.pi:
+        angle += 2.0 * math.pi
+    return angle
+class ControllerNode(Node):
+    def __init__(self):
+        super().__init__('controller_node')
+        # 로봇 상태
+        self.robot_pose = None
+        self.robot_yaw = None
+        self.raw_yaw = None
+        self.goal_pose = None
+        self.state = 'IDLE'
+        self.auto_start = False
+        self.last_pulse_time = self.get_clock().now()
+        # 목표 큐
+        self.goal_queue = deque()
+        # ROS 통신 설정 (상대 토픽명 + 파라미터화)
+        marker_id = self.declare_parameter('marker_id', 25).get_parameter_value().integer_value
+        topic_name = f"marker_map/ID{marker_id}"
+        self.create_subscription(PoseStamped, topic_name, self.robot_callback, 10)
+        self.cmd_pub = self.create_publisher(Twist, 'cmd_vel', 10)
+        self.timer = self.create_timer(0.15, self.control_loop)
+        # 각 경로 토픽에 대한 콜백 (상대 토픽명)
+        self.create_subscription(Bool, 'go_to_kitchen', lambda msg: self.load_path('kitchen', msg), 10)
+        self.create_subscription(Bool, 'go_to_serving', lambda msg: self.load_path('serving', msg), 10)
+        self.create_subscription(Bool, 'go_to_charge',  lambda msg: self.load_path('charge', msg), 10)
+        self.create_subscription(Bool, 'go_to_recall',  lambda msg: self.load_path('recall', msg), 10)
+        self.create_subscription(Bool, 'go_to_return',  lambda msg: self.load_path('return', msg), 10)
+        self.get_logger().info("[INIT] controller_node 초기화 완료. 명령 토픽을 대기 중.")
+    def load_path(self, path_name, msg):
+        if msg.data:
+            if path_name in GOAL_PATHS:
+                self.goal_queue.clear()
+                for x, y in GOAL_PATHS[path_name]:
+                    pt = Point()
+                    pt.x = x
+                    pt.y = y
+                    pt.z = 0.0
+                    self.goal_queue.append(pt)
+                self.auto_start = True
+                self.set_next_goal()
+                self.get_logger().info(f"[ROUTE] '{path_name}' 경로 시작 (총 {len(self.goal_queue)}개 좌표)")
+            else:
+                self.get_logger().warn(f"[ERROR] '{path_name}' 경로가 존재하지 않음")
+    def set_next_goal(self):
+        if self.goal_queue:
+            self.goal_pose = self.goal_queue.popleft()
+            self.state = 'ROTATE'
+            self.last_pulse_time = self.get_clock().now()
+            self.get_logger().info(f"[GOAL] 다음 목표: x={self.goal_pose.x:.2f}, y={self.goal_pose.y:.2f}")
+        else:
+            self.goal_pose = None
+            self.state = 'IDLE'
+            self.auto_start = False
+            self.get_logger().info("[GOAL] 모든 목표 완료. 대기 상태로 전환.")
+    def robot_callback(self, msg):
+        self.robot_pose = msg.pose.position
+        q = msg.pose.orientation
+        siny = 2.0 * (q.w * q.z + q.x * q.y)
+        cosy = 1.0 - 2.0 * (q.y**2 + q.z**2)
+        self.raw_yaw = math.atan2(siny, cosy)
+        self.robot_yaw = self.raw_yaw
+    def control_loop(self):
+        if not self.auto_start:
+            return
+        if self.robot_pose is None or self.robot_yaw is None or self.goal_pose is None:
+            return
+        dx = self.goal_pose.x - self.robot_pose.x
+        dy = self.goal_pose.y - self.robot_pose.y
+        target_yaw = math.atan2(dy, dx) - 0.5 * math.pi
+        yaw_err = normalize_angle(target_yaw - self.robot_yaw)
+        yaw_err_deg = math.degrees(yaw_err)
+        distance = math.hypot(dx, dy)
+        cmd = Twist()
+        if distance < GOAL_TOLERANCE:
+            self.get_logger().info(f"[DONE] 목표 도착 (±{GOAL_TOLERANCE}m). 다음 좌표로 이동.")
+            self.cmd_pub.publish(Twist())
+            self.set_next_goal()
+            return
+        if self.state == 'ROTATE':
+            if abs(yaw_err) < YAW_THRESHOLD:
+                self.get_logger().info(f"[STATE] ROTATE → FORWARD | yaw 오차 {yaw_err_deg:.2f}° < {YAW_THRESHOLD_DEG}°")
+                self.state = 'FORWARD'
+                cmd.linear.x = 0.1
+                cmd.angular.z = 0.1
+                self.cmd_pub.publish(cmd)
+                return
+            now = self.get_clock().now()
+            time_since_last = (now - self.last_pulse_time).nanoseconds / 1e9
+            cmd.angular.z = ROTATE_SPEED * math.copysign(1.0, yaw_err) if time_since_last < 0.15 else 0.0
+            cmd.linear.x = 0.0
+            if time_since_last > 0.2:
+                self.last_pulse_time = now
+            self.get_logger().info(f"[ROTATE] 회전 중 | yaw_err={yaw_err_deg:.2f}°")
+        elif self.state == 'FORWARD':
+            cmd.linear.x = LINEAR_SPEED
+            if abs(yaw_err) > YAW_THRESHOLD:
+                self.get_logger().info(f"[STATE] FORWARD → ROTATE | yaw 오차 {yaw_err_deg:.2f}° > {YAW_THRESHOLD_DEG}°")
+                self.state = 'ROTATE'
+                self.cmd_pub.publish(cmd)
+                return
+            cmd.angular.z = 0.0
+            self.get_logger().info(f"[FORWARD] 전진 중 | 거리={distance:.2f} m, yaw_err={yaw_err_deg:.2f}°")
+        self.cmd_pub.publish(cmd)
+def main(args=None):
+    rclpy.init(args=args)
+    node = ControllerNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+if __name__ == '__main__':
+    main()
