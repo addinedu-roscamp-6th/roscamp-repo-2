@@ -1,0 +1,216 @@
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QGroupBox, QTextEdit, QLabel, QDialog
+)
+from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+import cv2
+import logging
+import random
+from datetime import datetime
+
+# ─── 로깅 설정 ─────────────────────
+logging.basicConfig(filename='robot_log.txt', level=logging.INFO,
+                    format='%(asctime)s - %(levelname)s - %(message)s')
+
+class RobotControlUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("양로원 식사 배달 로봇 제어 인터페이스")
+        self.showMaximized()
+
+        # ─── 색상 팔레트 설정 ───────────────────
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#e1d5e7"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#647687"))
+        self.setPalette(palette)
+
+        # ─── 메인 레이아웃 ───────────────────────
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+
+        # ─── 좌측: 카메라 뷰 ─────────────────────
+        left_widget = QWidget()
+        left_widget.setStyleSheet("background-color: #bac8d3; border-radius: 10px; padding: 15px; border: 2px solid #647687;")
+        left_layout = QGridLayout(left_widget)
+        left_layout.setSpacing(8)
+
+        self.camera_labels = []
+        camera_names = ["JetCobot 카메라 1", "JetCobot 카메라 2", "Pinky 카메라 1", "Pinky 카메라 2"]
+        for i in range(4):
+            label = QLabel(camera_names[i])
+            label.setStyleSheet("background-color: #fff2cc; border: 2px solid #647687; border-radius: 6px; color: #647687; font-size: 16px; font-family: 'Arial';")
+            label.setFixedSize(640, 480)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            self.camera_labels.append(label)
+            left_layout.addWidget(label, i // 2, i % 2)
+
+        main_layout.addWidget(left_widget, stretch=1)
+
+        # ─── 우측: 제어 및 로그 ───────────────────
+        right_widget = QWidget()
+        right_widget.setStyleSheet("background-color: #bac8d3; border-radius: 10px; padding: 15px; border: 2px solid #647687;")
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setSpacing(15)
+
+        # 알림 그룹
+        alert_group = QGroupBox("알림")
+        alert_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        alert_layout = QVBoxLayout(alert_group)
+        self.alert_text = QTextEdit()
+        self.alert_text.setStyleSheet("background-color: #fff2cc; color: #647687; border: 2px solid #647687; border-radius: 6px; font-size: 14px; font-family: 'Arial';")
+        self.alert_text.setReadOnly(True)
+        alert_layout.addWidget(self.alert_text)
+
+        # 로봇 선택
+        robot_group = QGroupBox("로봇 선택")
+        robot_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        robot_layout = QGridLayout(robot_group)
+
+        robot_buttons = [
+            ("Pinky 1 제어", self.open_pinky1_control),
+            ("Pinky 2 제어", self.open_pinky2_control),
+            ("Pinky 3 제어", self.open_pinky3_control),
+            ("JetCobot 제어", self.open_jetcobot_control)
+        ]
+        for i, (text, func) in enumerate(robot_buttons):
+            btn = QPushButton(text)
+            btn.setStyleSheet("background-color: #e1d5e7; color: #647687; border-radius: 6px; padding: 22.5px; font-size: 24px; font-family: 'Arial'; border: 2px solid #647687;")
+            btn.setFixedSize(360, 180)
+            btn.clicked.connect(func)
+            robot_layout.addWidget(btn, i // 2, i % 2)
+
+        # 로그
+        log_group = QGroupBox("작업 로그")
+        log_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit()
+        self.log_text.setStyleSheet("background-color: #fff2cc; color: #647687; border: 2px solid #647687; border-radius: 6px; font-size: 14px; font-family: 'Arial';")
+        self.log_text.setReadOnly(True)
+        log_layout.addWidget(self.log_text)
+
+        right_layout.addWidget(alert_group)
+        right_layout.addWidget(robot_group)
+        right_layout.addWidget(log_group)
+        right_layout.addStretch()
+
+        main_layout.addWidget(right_widget, stretch=1)
+
+        # ─── 카메라 초기화 ───────────────────────
+        self.cameras = [
+            cv2.VideoCapture("http://192.168.247.164:9816/video_feed"),  # JetCobot 카메라 1
+            cv2.VideoCapture("http://127.0.0.1:9817/video_feed"),  # JetCobot 카메라 2
+            cv2.VideoCapture(2),  # Pinky 카메라 1 (로컬 장치)
+            cv2.VideoCapture(3)   # Pinky 카메라 2 (로컬 장치)
+        ]
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_cameras)
+        self.timer.start(100)
+
+        self.log_action("인터페이스 초기화 완료")
+
+    def update_cameras(self):
+        for i, cap in enumerate(self.cameras):
+            if cap.isOpened():
+                ret, frame = cap.read()
+                if ret:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    frame = cv2.resize(frame, (640, 480))
+                    h, w, ch = frame.shape
+                    bytes_per_line = ch * w
+                    q_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+                    self.camera_labels[i].setPixmap(QPixmap.fromImage(q_img))
+
+    def open_pinky1_control(self): self.open_pinky_control("Pinky 1")
+    def open_pinky2_control(self): self.open_pinky_control("Pinky 2")
+    def open_pinky3_control(self): self.open_pinky_control("Pinky 3")
+
+    def open_pinky_control(self, pinky_name):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"{pinky_name} 제어")
+        dialog.setStyleSheet("background-color: #fff2cc;")
+        layout = QGridLayout(dialog)
+        layout.setSpacing(10)
+        buttons = [
+            ("주방으로 이동", lambda: self.move_to_kitchen(pinky_name)),
+            ("방으로 이동", lambda: self.move_to_room(pinky_name)),
+            ("위치 확인", lambda: self.report_position(pinky_name)),
+            ("충전소로 이동", lambda: self.move_to_charge(pinky_name)),
+            ("정지", lambda: self.pinky_stop(pinky_name)),
+            ("대기", lambda: self.pinky_standby(pinky_name))
+        ]
+        for i, (text, func) in enumerate(buttons):
+            btn = QPushButton(text)
+            btn.setStyleSheet("background-color: #e1d5e7; color: #647687; border-radius: 6px; padding: 10px; font-size: 18px; font-family: 'Arial'; border: 2px solid #647687;")
+            btn.setFixedSize(300, 200)
+            btn.clicked.connect(func)
+            layout.addWidget(btn, i // 2, i % 2)
+        dialog.setFixedSize(1000, 800)
+        dialog.exec()
+
+    def open_jetcobot_control(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("JetCobot 제어")
+        dialog.setStyleSheet("background-color: #fff2cc;")
+        layout = QGridLayout(dialog)
+        layout.setSpacing(10)
+        buttons = [
+            ("식사 적재", self.load_meal),
+            ("식사 하역", self.unload_meal),
+            ("대기", self.jetcobot_standby),
+            ("정지", self.jetcobot_stop)
+        ]
+        for i, (text, func) in enumerate(buttons):
+            btn = QPushButton(text)
+            btn.setStyleSheet("background-color: #e1d5e7; color: #647687; border-radius: 6px; padding: 10px; font-size: 18px; font-family: 'Arial'; border: 2px solid #647687;")
+            btn.setFixedSize(300, 200)
+            btn.clicked.connect(func)
+            layout.addWidget(btn, i // 2, i % 2)
+        dialog.setFixedSize(1000, 600)
+        dialog.exec()
+
+    def move_to_kitchen(self, name): self._log_and_alert(name, "주방으로 이동")
+    def move_to_room(self, name): self._log_and_alert(name, "방으로 이동")
+    def report_position(self, name): self._log_and_alert(name, "위치 보고")
+    def move_to_charge(self, name): self._log_and_alert(name, "충전소로 이동")
+    def pinky_stop(self, name): self._log_and_alert(name, "정지")
+    def pinky_standby(self, name): self._log_and_alert(name, "대기")
+    def load_meal(self): self._log_and_alert("JetCobot", "식사 적재 시작")
+    def unload_meal(self): self._log_and_alert("JetCobot", "식사 하역 시작")
+    def jetcobot_standby(self): self._log_and_alert("JetCobot", "대기")
+    def jetcobot_stop(self): self._log_and_alert("JetCobot", "정지")
+
+    def _log_and_alert(self, who, action):
+        self.log_action(f"{who} {action}")
+        if random.random() > 0.7:
+            self.alert_action(f"{who} {action} 중 이상 감지됨")
+
+    def log_action(self, msg):
+        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log_text.append(f"[{timestamp}] {msg}")
+        logging.info(msg)
+
+    def alert_action(self, msg):
+        if msg:
+            timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            self.alert_text.append(f"[{timestamp}] ⚠️ {msg}")
+
+    def closeEvent(self, event):
+        for cap in self.cameras:
+            if cap.isOpened():
+                cap.release()
+        super().closeEvent(event)
+
+if __name__ == "__main__":
+    app = QApplication([])
+    window = RobotControlUI()
+    window.show()
+    app.exec()
