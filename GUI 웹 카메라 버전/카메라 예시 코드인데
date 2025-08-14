@@ -1,23 +1,71 @@
-#주의!!!!!!!!!!!!!
-#이건 로봇팔 쪾 예시 카메라 코드입니다 즉 각 핑키에 맞춰서 해당 값을 수정해야합니다
-# camera_stream_server.py
-from flask import Flask, Response
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import os, time, threading
 import cv2
+from flask import Flask, Response
+from pinkylib import Camera
 
+# ===== 설정 =====
+PORT = int(os.getenv("PORT", "9821"))   # 포트 변경 원하면 환경변수 PORT로 지정
+WIDTH = int(os.getenv("WIDTH", "320"))
+HEIGHT = int(os.getenv("HEIGHT", "240"))
+JPEG_QUALITY = int(os.getenv("JPEG_QUALITY", "80"))
+
+# ===== 전역 상태 =====
 app = Flask(__name__)
-cap = cv2.VideoCapture(0)  # JetCobot 카메라 장치
+_cam = None
+_latest = None
+_lock = threading.Lock()
+_running = True
 
-def gen_frames():
-    while True:
-        success, frame = cap.read()
-        if not success:
-            break
-        _, buffer = cv2.imencode('.jpg', frame)
-        yield (b'--frame\r\nContent-Type: image/jpeg\r\n\r\n' + buffer.tobytes() + b'\r\n')
+def camera_loop():
+    global _cam, _latest, _running
+    _cam = Camera()
+    _cam.start(width=WIDTH, height=HEIGHT)
+    while _running:
+        frame = _cam.get_frame()
+        if frame is not None:
+            with _lock:
+                _latest = frame
+        else:
+            time.sleep(0.01)
 
-@app.route('/video_feed')
-def video_feed():
-    return Response(gen_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route("/")
+def index():
+    # 간단한 뷰 페이지 (MJPEG)
+    return "<h2>Robot Camera</h2><img src='/video'/>"
+
+@app.route("/video")
+def video():
+    def gen():
+        while True:
+            with _lock:
+                frame = None if _latest is None else _latest.copy()
+            if frame is None:
+                time.sleep(0.01)
+                continue
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY])
+            if not ok:
+                continue
+            yield (b"--frame\r\nContent-Type: image/jpeg\r\n\r\n" + buf.tobytes() + b"\r\n")
+            time.sleep(0.01)
+    return Response(gen(), mimetype="multipart/x-mixed-replace; boundary=frame")
+
+def main():
+    t = threading.Thread(target=camera_loop, daemon=True)
+    t.start()
+    try:
+        app.run(host="0.0.0.0", port=PORT, threaded=True)
+    finally:
+        global _running
+        _running = False
+        t.join(timeout=1.0)
+        if _cam:
+            try:
+                _cam.close()
+            except Exception:
+                pass
 
 if __name__ == "__main__":
-    app.run(host='0.0.0.0', port=9816)
+    main()
