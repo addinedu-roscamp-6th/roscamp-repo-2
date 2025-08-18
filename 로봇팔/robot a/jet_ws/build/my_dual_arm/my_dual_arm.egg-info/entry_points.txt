@@ -1,0 +1,4 @@
+[console_scripts]
+coordinator_node = my_dual_arm.coordinator_node:main
+robot_a1_node = my_dual_arm.robot_a1_node:main
+robot_b1_node = my_dual_arm.robot_b1_node:main
