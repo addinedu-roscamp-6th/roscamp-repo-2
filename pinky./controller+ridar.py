@@ -10,32 +10,34 @@ from pinky_controller.goal_points import GOAL_PATHS, FINAL_YAWS_DEG
 
 # ===== 사용자 설정값 =====
 YAW_THRESHOLD_DEG    = 7.0
-ROTATE_SPEED_DEG     = 0.1
-LINEAR_SPEED         = 0.1
+ROTATE_SPEED_DEG     = 0.5
+LINEAR_SPEED         = 0.5
 GOAL_TOLERANCE       = 0.1
 
 # ---- 라이다 관련 (필수 조정 포인트) ----
-FRONT_FOV_DEG        = 60.0     # 전방 검사 시야각(정면 기준 ±30°)
-LIDAR_YAW_OFFSET_DEG = 180.0      # 라이다 정면 오프셋 보정(+이면 좌측으로 치운 좌표계)
-MIN_OBS_DIST_ON      = 0.2    # 장애물 감지(ON) 임계거리
-MIN_OBS_DIST_OFF     = 0.3    # 장애물 해제(OFF) 임계거리(ON보다 크게)
+FRONT_FOV_DEG        = 60.0     # 원하는 스캔 폭(총각). 예: 30이면 앞 기준 ±15°
+LIDAR_YAW_OFFSET_DEG = 180.0    # ★ 기준 시점(아래 FRONT_FOV_BASE_DEG에서) 맞춰둔 '앞' 중심각
+FRONT_FOV_BASE_DEG   = 10.0     # ★ 과거에 앞방향이 "정확히" 맞았던 기준 폭(=10°에서 180°가 앞을 가리킴)
+MIN_OBS_DIST_ON      = 0.25     # 장애물 감지(ON) 임계거리
+MIN_OBS_DIST_OFF     = 0.75     # 장애물 해제(OFF) 임계거리(ON보다 크게)
 USE_PCTL             = True     # 최솟값 대신 하위 백분위수 사용
 PCTL                 = 20       # 하위 20% 지점
 
 # ---- 회피 파라미터 ----
-AVOID_FORWARD_DIST   = 0.08     # 측방 전진 거리(m)
+# 회피 직진 3구간 각각의 거리 (요청사항)
+AVOID_FORWARD_DIST_1 = 0.10     # R45 후 1차 전진
+AVOID_FORWARD_DIST_2 = 0.10     # L45 후 2차 전진
+AVOID_FORWARD_DIST_3 = 0.10     # 두 번째 L45 후 마지막 전진
 PULSE_ON_SEC         = 0.15     # 펄스 회전 on 시간
 PULSE_RESET_SEC      = 0.20     # 펄스 타이머 리셋 간격
 
-# ===== [추가] 좌표 기반 회피 ON/OFF 지점 =====
-# (x, y, r) 형식. r은 판정 반경(m). 필요 지점 자유롭게 추가/수정.
+# ===== 좌표 기반 회피 ON/OFF 지점 =====
 ENABLE_POINTS  = [
-    # 예) (0.11, 0.88, 0.15),  # 이 원 안으로 진입하면 회피 '활성화'
+    # (0.11, 0.88, 0.15),
 ]
 DISABLE_POINTS = [
-    (0.54, 0.8, 0.15),        # kitchen 경로 중 이 지점 진입 시 회피 '비활성화'
+    (0.54, 0.8, 0.15),
 ]
-# ------------------------------------------------
 
 # 라디안 변환
 YAW_THRESHOLD = math.radians(YAW_THRESHOLD_DEG)
@@ -48,20 +50,17 @@ def normalize_angle(angle):
         angle += 2.0 * math.pi
     return angle
 
-# ===== [추가] 간단한 원형 지오펜스 게이트 =====
 class _CircleGate:
     """원 경계 바깥→안쪽으로 진입할 때 한 번만 True를 반환"""
     def __init__(self, x, y, r):
         self.x = float(x); self.y = float(y); self.r = float(r)
         self.prev_outside = True
-
     def update_and_fired(self, px, py):
         dx = px - self.x; dy = py - self.y
         inside = (dx*dx + dy*dy) <= (self.r * self.r)
         fired = (self.prev_outside and inside)
         self.prev_outside = (not inside)
         return fired
-# ==============================================
 
 class ControllerNode(Node):
     def __init__(self):
@@ -78,8 +77,7 @@ class ControllerNode(Node):
 
         # 목표 큐
         self.goal_queue = deque()
-        # 경로별 최종 정렬 목표 각도(rad). 경로 로드 시 갱신됨. 기본 -90도
-        self.final_target_yaw = -0.5 * math.pi
+        self.final_target_yaw = -0.5 * math.pi  # 기본 -90도
 
         # 파라미터
         marker_id = self.declare_parameter('marker_id', 26).get_parameter_value().integer_value
@@ -93,8 +91,10 @@ class ControllerNode(Node):
         self.create_subscription(Bool, 'go_to_kitchen', lambda msg: self.load_path('kitchen', msg), 10)
         self.create_subscription(Bool, 'go_to_serving', lambda msg: self.load_path('serving', msg), 10)
         self.create_subscription(Bool, 'go_to_charge',  lambda msg: self.load_path('charge', msg), 10)
+        self.create_subscription(Bool, 'go_to_room',    lambda msg: self.load_path('room', msg), 10)
         self.create_subscription(Bool, 'go_to_recall',  lambda msg: self.load_path('recall', msg), 10)
         self.create_subscription(Bool, 'go_to_return',  lambda msg: self.load_path('return', msg), 10)
+        self.create_subscription(Bool, 'stop', self.cb_stop, 10)  # ✅ STOP 구독
 
         # 라이다
         self.create_subscription(LaserScan, '/scan', self.scan_callback, 10)
@@ -104,8 +104,8 @@ class ControllerNode(Node):
         self.avoid_target_yaw = None
         self.avoid_start_pos = None
 
-        # ===== [추가] 회피 ON/OFF 플래그 및 게이트 준비 =====
-        self.obstacle_enabled = True  # 기본 ON (초기값은 네가 원하면 변경)
+        # 회피 ON/OFF 게이트
+        self.obstacle_enabled = True
         self.enable_gates  = [_CircleGate(*p) for p in ENABLE_POINTS]
         self.disable_gates = [_CircleGate(*p) for p in DISABLE_POINTS]
 
@@ -151,48 +151,46 @@ class ControllerNode(Node):
         self.raw_yaw = math.atan2(siny, cosy)
         self.robot_yaw = self.raw_yaw
 
-        # ===== [추가] 좌표 기반 회피 ON/OFF 트리거 =====
         if self.robot_pose is not None:
             px, py = self.robot_pose.x, self.robot_pose.y
-
-            # 비활성화 존 진입
             for gate in self.disable_gates:
                 if gate.update_and_fired(px, py):
                     if self.obstacle_enabled:
                         self.obstacle_enabled = False
-                        self.front_blocked = False  # 즉시 차단 해제
+                        self.front_blocked = False
                         self.get_logger().warn("장애물 인식 비활성화됨!")
-
-            # 활성화 존 진입
             for gate in self.enable_gates:
                 if gate.update_and_fired(px, py):
                     if not self.obstacle_enabled:
                         self.obstacle_enabled = True
                         self.get_logger().info("장애물 인식 활성화됨!")
 
-    # ---------- 라이다(정면 각도 구간만 검사 + 히스테리시스) ----------
+    # ---------- 라이다 ----------
     def scan_callback(self, scan: LaserScan):
-        # ===== [추가] 회피 OFF일 때는 라이다 무시 =====
         if not getattr(self, 'obstacle_enabled', True):
             return
         try:
             if not scan.ranges:
                 return
 
+            # ★★★ 중심각(앞방향)을 고정하고 폭만 바꿔도 자동 보정되는 창문 계산 ★★★
+            # 기준: FRONT_FOV_BASE_DEG에서 LIDAR_YAW_OFFSET_DEG가 '앞'을 정확히 가리킴
+            # 새 폭(FRONT_FOV_DEG)에 대해 center를 유지하려면 offset을 아래처럼 보정
+            # effective_offset_deg = LIDAR_YAW_OFFSET_DEG + (FRONT_FOV_BASE_DEG - FRONT_FOV_DEG)/2
             half = math.radians(FRONT_FOV_DEG * 0.5)
-            offset = math.radians(LIDAR_YAW_OFFSET_DEG)
+            effective_offset_deg = LIDAR_YAW_OFFSET_DEG + 0.5 * (FRONT_FOV_BASE_DEG - FRONT_FOV_DEG)
+            offset = math.radians(effective_offset_deg)
+
             ang_min, ang_max, inc = scan.angle_min, scan.angle_max, scan.angle_increment
 
-            # 검사구간: [ -half + offset , +half + offset ]
-            from_ang = max(ang_min, -half + offset)
-            to_ang   = min(ang_max, +half + offset)
+            from_ang = max(ang_min, -half + offset)  # = center - half
+            to_ang   = min(ang_max, +half + offset)  # = center + half
             if to_ang <= from_ang:
                 return
 
             i_from = max(0, int((from_ang - ang_min) / inc))
             i_to   = min(len(scan.ranges) - 1, int((to_ang   - ang_min) / inc))
 
-            # 유효값만
             window = []
             rmax = scan.range_max if math.isfinite(scan.range_max) and scan.range_max > 0.0 else float('inf')
             for r in scan.ranges[i_from:i_to+1]:
@@ -201,7 +199,6 @@ class ControllerNode(Node):
             if not window:
                 return
 
-            # 노이즈 완화
             if USE_PCTL:
                 window.sort()
                 k = max(0, min(len(window)-1, int(len(window)*PCTL/100.0)))
@@ -209,7 +206,6 @@ class ControllerNode(Node):
             else:
                 front_near = min(window)
 
-            # 히스테리시스
             if not self.front_blocked and front_near < MIN_OBS_DIST_ON:
                 self.front_blocked = True
                 self.get_logger().info(f"[LIDAR] 전방 차단 감지: ≈{front_near:.2f} m (ON<{MIN_OBS_DIST_ON}m)")
@@ -229,7 +225,6 @@ class ControllerNode(Node):
 
         dx = self.goal_pose.x - self.robot_pose.x
         dy = self.goal_pose.y - self.robot_pose.y
-        # 좌표계 보정: 맵 정의에 맞춰 -0.5*pi 유지
         target_yaw = math.atan2(dy, dx) - 0.5 * math.pi
         yaw_err = normalize_angle(target_yaw - self.robot_yaw)
         yaw_err_deg = math.degrees(yaw_err)
@@ -237,18 +232,21 @@ class ControllerNode(Node):
 
         cmd = Twist()
 
-        # [SAFETY] 전방 장애물 감지 시, 어떤 상태든 즉시 정지 + 회피 진입(회피 상태가 아닐 때만)
-        # ===== [추가] 회피가 '활성화' 상태일 때만 진입 =====
-        if getattr(self, 'obstacle_enabled', True) and self.front_blocked and self.state not in ('AVOID_TURN_RIGHT', 'AVOID_FORWARD', 'AVOID_TURN_LEFT'):
-            self.cmd_pub.publish(Twist())  # ★즉시 정지
-            self.avoid_target_yaw = normalize_angle(self.robot_yaw - math.pi/2.5)  # 우회전 70°
+        # [SAFETY] 전방 차단 시 회피 시퀀스 진입(중복 진입 방지)
+        if getattr(self, 'obstacle_enabled', True) and self.front_blocked and self.state not in (
+            'AVOID_TURN_RIGHT', 'AVOID_FORWARD', 'AVOID_TURN_LEFT',
+            'AVOID_FORWARD_2', 'AVOID_TURN_LEFT_2', 'AVOID_FORWARD_3'
+        ):
+            self.cmd_pub.publish(Twist())  # 즉시 정지
+            # 1) 오른쪽 45°
+            self.avoid_target_yaw = normalize_angle(self.robot_yaw - math.pi/4.0)
             self.avoid_start_pos = None
             self.state = 'AVOID_TURN_RIGHT'
             self.last_pulse_time = self.get_clock().now()
-            self.get_logger().warn("[SAFETY] 전방 장애물 감지 → 즉시 정지 & 회피 진입")
+            self.get_logger().warn("[SAFETY] 장애물 감지 → 정지 & 회피 시작 (오른쪽 45°)")
             return
 
-        # ➊ FINAL_ALIGN 우선 처리
+        # ➊ 최종 정렬
         if self.state == 'FINAL_ALIGN':
             target_yaw_final = self.final_target_yaw
             yaw_err2 = normalize_angle(target_yaw_final - self.robot_yaw)
@@ -268,7 +266,7 @@ class ControllerNode(Node):
             self.cmd_pub.publish(cmd)
             return
 
-        # ➋ 목표 도달 처리 (중간/최종 구분)
+        # ➋ 목표 도달
         if distance < GOAL_TOLERANCE:
             self.cmd_pub.publish(Twist())
             if self.goal_queue:
@@ -279,9 +277,9 @@ class ControllerNode(Node):
                 self.get_logger().info("[DONE] 최종 목표 도착. 최종 각도 정렬 시작.")
                 self.state = 'FINAL_ALIGN'
                 self.last_pulse_time = self.get_clock().now()
-                return  # 다음 틱에서 FINAL_ALIGN가 최우선으로 실행
+                return
 
-        # ➌ 일반 상태머신 (ROTATE / FORWARD)
+        # ➌ 일반 FSM
         if self.state == 'ROTATE':
             if abs(yaw_err) < YAW_THRESHOLD:
                 self.get_logger().info(f"[STATE] ROTATE → FORWARD | yaw 오차 {yaw_err_deg:.2f}° < {YAW_THRESHOLD_DEG}°")
@@ -299,7 +297,6 @@ class ControllerNode(Node):
             self.cmd_pub.publish(cmd)
 
         elif self.state == 'FORWARD':
-            # (여기까지 오면 front_blocked는 False 상태)
             cmd.linear.x = LINEAR_SPEED
             if abs(yaw_err) > YAW_THRESHOLD:
                 self.get_logger().info(f"[STATE] FORWARD → ROTATE | yaw 오차 {yaw_err_deg:.2f}° > {YAW_THRESHOLD_DEG}°")
@@ -310,14 +307,15 @@ class ControllerNode(Node):
             self.get_logger().info(f"[FORWARD] 전진 중 | 거리={distance:.2f} m, yaw_err={yaw_err_deg:.2f}°")
             self.cmd_pub.publish(cmd)
 
-        # ➍ 회피 시퀀스 (우회전 → 측방 전진 → 좌회전)
+        # ➍ 회피 시퀀스 (→R90 →F1 →L90 →F2 →L90 →F3)
         elif self.state == 'AVOID_TURN_RIGHT':
             yaw_err_r = normalize_angle(self.avoid_target_yaw - self.robot_yaw)
             if abs(yaw_err_r) < YAW_THRESHOLD:
                 self.cmd_pub.publish(Twist())
+                # 2) 직진(구간1)
                 self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
                 self.state = 'AVOID_FORWARD'
-                self.get_logger().info(f"[AVOID] 우회전 완료 → 측방 전진 {AVOID_FORWARD_DIST:.2f} m")
+                self.get_logger().info(f"[AVOID] 오른쪽 45° 완료 → 전진 {AVOID_FORWARD_DIST_1:.2f} m")
                 return
             now = self.get_clock().now()
             t = (now - self.last_pulse_time).nanoseconds / 1e9
@@ -332,12 +330,13 @@ class ControllerNode(Node):
                 self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
             moved = math.hypot(self.robot_pose.x - self.avoid_start_pos[0],
                                self.robot_pose.y - self.avoid_start_pos[1])
-            if moved >= AVOID_FORWARD_DIST:
+            if moved >= AVOID_FORWARD_DIST_1:
                 self.cmd_pub.publish(Twist())
-                self.avoid_target_yaw = normalize_angle(self.robot_yaw + math.pi/3.0)  # 좌회전 70°
+                # 3) 왼쪽 45°
+                self.avoid_target_yaw = normalize_angle(self.robot_yaw + math.pi/4.0)
                 self.state = 'AVOID_TURN_LEFT'
                 self.last_pulse_time = self.get_clock().now()
-                self.get_logger().info("[AVOID] 측방 전진 완료 → 좌회전 70°")
+                self.get_logger().info("[AVOID] 1차 전진 완료 → 왼쪽 40°")
                 return
             cmd.linear.x = LINEAR_SPEED
             cmd.angular.z = 0.0
@@ -347,8 +346,10 @@ class ControllerNode(Node):
             yaw_err_l = normalize_angle(self.avoid_target_yaw - self.robot_yaw)
             if abs(yaw_err_l) < YAW_THRESHOLD:
                 self.cmd_pub.publish(Twist())
-                self.state = 'ROTATE'  # 원래 목표를 향해 다시 정렬
-                self.get_logger().info("[AVOID] 좌회전 완료 → 경로 복귀(ROTATE)")
+                # 4) 직진(구간2)
+                self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
+                self.state = 'AVOID_FORWARD_2'
+                self.get_logger().info(f"[AVOID] 왼쪽 90° 완료 → 전진 {AVOID_FORWARD_DIST_2:.2f} m")
                 return
             now = self.get_clock().now()
             t = (now - self.last_pulse_time).nanoseconds / 1e9
@@ -357,6 +358,74 @@ class ControllerNode(Node):
             if t > PULSE_RESET_SEC:
                 self.last_pulse_time = now
             self.cmd_pub.publish(cmd)
+
+        elif self.state == 'AVOID_FORWARD_2':
+            if self.avoid_start_pos is None:
+                self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
+            moved = math.hypot(self.robot_pose.x - self.avoid_start_pos[0],
+                               self.robot_pose.y - self.avoid_start_pos[1])
+            if moved >= AVOID_FORWARD_DIST_2:
+                self.cmd_pub.publish(Twist())
+                # 5) 왼쪽 45°
+                self.avoid_target_yaw = normalize_angle(self.robot_yaw + math.pi/4.5)
+                self.state = 'AVOID_TURN_LEFT_2'
+                self.last_pulse_time = self.get_clock().now()
+                self.get_logger().info("[AVOID] 2차 전진 완료 → 다시 왼쪽 90°")
+                return
+            cmd.linear.x = LINEAR_SPEED
+            cmd.angular.z = 0.0
+            self.cmd_pub.publish(cmd)
+
+        elif self.state == 'AVOID_TURN_LEFT_2':
+            yaw_err_l2 = normalize_angle(self.avoid_target_yaw - self.robot_yaw)
+            if abs(yaw_err_l2) < YAW_THRESHOLD:
+                self.cmd_pub.publish(Twist())
+                # 6) 마지막 직진(구간3)
+                self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
+                self.state = 'AVOID_FORWARD_3'
+                self.get_logger().info(f"[AVOID] 두 번째 왼쪽 90° 완료 → 마지막 전진 {AVOID_FORWARD_DIST_3:.2f} m")
+                return
+            now = self.get_clock().now()
+            t = (now - self.last_pulse_time).nanoseconds / 1e9
+            cmd.angular.z = ROTATE_SPEED * math.copysign(1.0, yaw_err_l2) if t < PULSE_ON_SEC else 0.0
+            cmd.linear.x = 0.0
+            if t > PULSE_RESET_SEC:
+                self.last_pulse_time = now
+            self.cmd_pub.publish(cmd)
+
+        elif self.state == 'AVOID_FORWARD_3':
+            if self.avoid_start_pos is None:
+                self.avoid_start_pos = (self.robot_pose.x, self.robot_pose.y)
+            moved = math.hypot(self.robot_pose.x - self.avoid_start_pos[0],
+                               self.robot_pose.y - self.avoid_start_pos[1])
+            if moved >= AVOID_FORWARD_DIST_3:
+                self.cmd_pub.publish(Twist())
+                # 7) 회피 종료 → 원래 경로 복귀(ROTATE)
+                self.state = 'ROTATE'
+                self.get_logger().info("[AVOID] 마지막 전진 완료 → 경로 복귀(ROTATE)")
+                return
+            cmd.linear.x = LINEAR_SPEED
+            cmd.angular.z = 0.0
+            self.cmd_pub.publish(cmd)
+
+    # ---------- ✅ STOP 콜백 ----------
+    def cb_stop(self, msg: Bool):
+        if not msg.data:
+            return
+        # 즉시 정지
+        try:
+            self.cmd_pub.publish(Twist())
+        except Exception:
+            pass
+        # 상태 리셋
+        self.auto_start = False
+        self.state = 'IDLE'
+        self.goal_queue.clear()
+        self.goal_pose = None
+        self.avoid_target_yaw = None
+        self.avoid_start_pos = None
+        self.front_blocked = False
+        self.get_logger().warn("[STOP] 수신 → 즉시 정지 및 IDLE 전환")
 
 def main(args=None):
     rclpy.init(args=args)
@@ -367,4 +436,3 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
-
