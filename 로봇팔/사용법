@@ -1,0 +1,52 @@
+각 파일에 jet로 시작되는 파일을 홈 파일에 넣고(우분투-버전) 밑에 있는 실행 한 것 넣어야함
+
+<공통 빌트 및 설치>
+##복사하삼
+# ROS 2 환경 설정 및 작업공간 이동
+source /opt/ros/jazzy/setup.bash
+cd ~/jet_ws
+
+# 기존 빌드 삭제 후 새 빌드 수행
+rm -rf build/ install/ log/
+colcon build --symlink-install
+
+# 빌드된 환경 적용
+source install/local_setup.bash
+##
+
+<각 노드별 실행 명령어>
+
+로봇팔a 
+##복사
+source /opt/ros/jazzy/setup.bash
+source ~/jet_ws/install/local_setup.bash
+export ROS_DOMAIN_ID=8
+ros2 run my_dual_arm robot_a1_node
+##
+
+
+로봇팔b
+##
+source /opt/ros/jazzy/setup.bash
+source ~/jet_ws/install/local_setup.bash
+export ROS_DOMAIN_ID=8
+ros2 run my_dual_arm robot_b1_node
+##
+
+
+
+
+중앙 제어 노드 실행 
+##
+source /opt/ros/jazzy/setup.bash
+source ~/jet_ws/install/local_setup.bash
+export ROS_DOMAIN_ID=8
+ros2 run my_dual_arm coordinator_node
+##
+
+
+
+
+
+
+
