@@ -1,0 +1,13 @@
+package.xml
+setup.cfg
+setup.py
+my_dual_arm/__init__.py
+my_dual_arm/robot_b1_node.py
+my_dual_arm.egg-info/PKG-INFO
+my_dual_arm.egg-info/SOURCES.txt
+my_dual_arm.egg-info/dependency_links.txt
+my_dual_arm.egg-info/entry_points.txt
+my_dual_arm.egg-info/requires.txt
+my_dual_arm.egg-info/top_level.txt
+my_dual_arm.egg-info/zip-safe
+resource/my_dual_arm

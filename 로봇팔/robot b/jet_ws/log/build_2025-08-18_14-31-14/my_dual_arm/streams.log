@@ -1,0 +1,23 @@
+[1.343s] Invoking command in '/home/jetcobot/jet_ws/build/my_dual_arm': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/jetcobot/jet_ws/build/my_dual_arm/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jetcobot/jet_ws/install/my_dual_arm/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jetcobot/jet_ws/build/my_dual_arm/build --no-deps symlink_data
+[1.849s] running develop
+[2.184s] running egg_info
+[2.184s] creating my_dual_arm.egg-info
+[2.216s] writing my_dual_arm.egg-info/PKG-INFO
+[2.217s] writing dependency_links to my_dual_arm.egg-info/dependency_links.txt
+[2.217s] writing entry points to my_dual_arm.egg-info/entry_points.txt
+[2.217s] writing requirements to my_dual_arm.egg-info/requires.txt
+[2.217s] writing top-level names to my_dual_arm.egg-info/top_level.txt
+[2.217s] writing manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+[2.283s] reading manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+[2.284s] writing manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+[2.318s] running build_ext
+[2.318s] Creating /home/jetcobot/jet_ws/install/my_dual_arm/lib/python3.12/site-packages/my-dual-arm.egg-link (link to .)
+[2.319s] Installing coordinator_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+[2.320s] Installing robot_a1_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+[2.320s] Installing robot_b1_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+[2.320s] 
+[2.320s] Installed /home/jetcobot/jet_ws/build/my_dual_arm
+[2.320s] running symlink_data
+[2.320s] symbolically linking /home/jetcobot/jet_ws/build/my_dual_arm/package.xml -> /home/jetcobot/jet_ws/install/my_dual_arm/share/my_dual_arm
+[2.321s] symbolically linking /home/jetcobot/jet_ws/build/my_dual_arm/resource/my_dual_arm -> /home/jetcobot/jet_ws/install/my_dual_arm/share/my_dual_arm
+[2.420s] Invoked command in '/home/jetcobot/jet_ws/build/my_dual_arm' returned '0': DEBUGINFOD_URLS=https://debuginfod.ubuntu.com PYTHONPATH=/home/jetcobot/jet_ws/build/my_dual_arm/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/jetcobot/jet_ws/install/my_dual_arm/lib/python3.12/site-packages:${PYTHONPATH} /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/jetcobot/jet_ws/build/my_dual_arm/build --no-deps symlink_data

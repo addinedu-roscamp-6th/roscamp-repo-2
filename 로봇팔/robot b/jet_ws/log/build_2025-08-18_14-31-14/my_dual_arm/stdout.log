@@ -1,0 +1,21 @@
+running develop
+running egg_info
+creating my_dual_arm.egg-info
+writing my_dual_arm.egg-info/PKG-INFO
+writing dependency_links to my_dual_arm.egg-info/dependency_links.txt
+writing entry points to my_dual_arm.egg-info/entry_points.txt
+writing requirements to my_dual_arm.egg-info/requires.txt
+writing top-level names to my_dual_arm.egg-info/top_level.txt
+writing manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+reading manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+writing manifest file 'my_dual_arm.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/jetcobot/jet_ws/install/my_dual_arm/lib/python3.12/site-packages/my-dual-arm.egg-link (link to .)
+Installing coordinator_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+Installing robot_a1_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+Installing robot_b1_node script to /home/jetcobot/jet_ws/install/my_dual_arm/lib/my_dual_arm
+
+Installed /home/jetcobot/jet_ws/build/my_dual_arm
+running symlink_data
+symbolically linking /home/jetcobot/jet_ws/build/my_dual_arm/package.xml -> /home/jetcobot/jet_ws/install/my_dual_arm/share/my_dual_arm
+symbolically linking /home/jetcobot/jet_ws/build/my_dual_arm/resource/my_dual_arm -> /home/jetcobot/jet_ws/install/my_dual_arm/share/my_dual_arm
