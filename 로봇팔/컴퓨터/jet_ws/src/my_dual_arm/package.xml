@@ -1,0 +1,20 @@
+<?xml version="1.0"?>
+<package format="3">
+  <name>my_dual_arm</name>
+  <version>0.0.0</version>
+  <description>Robot A and B coordination system</description>
+  <maintainer email="you@example.com">jetcobot</maintainer>
+  <license>MIT</license>
+
+  <!-- Build tool 설정 -->
+  <buildtool_depend>ament_python</buildtool_depend>
+
+  <!-- 실행에 필요한 의존성 -->
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+
+  <!-- export 내에 build_type 명시 -->
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

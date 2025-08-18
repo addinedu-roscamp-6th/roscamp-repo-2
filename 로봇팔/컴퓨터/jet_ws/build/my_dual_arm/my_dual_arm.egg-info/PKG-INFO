@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: my-dual-arm
+Version: 0.0.0
+Summary: Robot A and B coordination system
+Maintainer: jetcobot
+Maintainer-email: you@example.com
+License: MIT
