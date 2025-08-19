@@ -4,7 +4,7 @@
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
-from std_msgs.msg import Int32, Bool
+from std_msgs.msg import Int32, Bool, String
 import threading
 import time
 import sys
@@ -20,6 +20,11 @@ class CoordinatorNode(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=1,
         )
+
+        # GUI 로그 퍼블리셔 및 stdout 리디렉션
+        self.pub_gui_log = self.create_publisher(String, '/coordinator/gui_log', 10)
+        sys.stdout = GuiLogger(sys.stdout, self.pub_gui_log)
+        sys.stderr = GuiLogger(sys.stderr, self.pub_gui_log)
 
         # 상태
         self.current_step = None
@@ -93,7 +98,7 @@ class CoordinatorNode(Node):
         elif cmd == 4:
             self._reset_from_any_source()
         elif cmd == 9:
-            self.get_logger().info("🛑 GUI 종료 명령 수신")
+            self.get_logger().info("\U0001f6d1 GUI 종료 명령 수신")
             rclpy.shutdown()
         else:
             self.get_logger().warn(f"⚠️ 알 수 없는 명령: {cmd}")
@@ -111,7 +116,7 @@ class CoordinatorNode(Node):
         self.pulse_bool(self.pub_a_move_ready)
         self.pulse_bool(self.pub_b_move_ready)
 
-        self.get_logger().info("3=계속 / 4=초기화 명령 대기 중 (GUI 또는 콘솔 입력 가능)")
+        self.get_logger().info("계속 / 초기화 명령 대기 중 (GUI 또는 콘솔 입력 가능)")
         self._pause_input_waiting = True
 
         threading.Thread(target=self._wait_console_input, daemon=True).start()
@@ -119,7 +124,7 @@ class CoordinatorNode(Node):
     def _wait_console_input(self):
         while self._pause_input_waiting:
             try:
-                ans = input("3=계속 / 4=초기화 ? ").strip()
+                ans = input("계속 / 초기화 ? ").strip()
             except EOFError:
                 time.sleep(0.1)
                 continue
@@ -153,7 +158,8 @@ class CoordinatorNode(Node):
         self.go_sent_once = False
         self._pause_input_waiting = False
         self._menu_start_evt.set()
-        self.get_logger().info("🔄 초기화: 메뉴로 복귀")
+        self.gui_log("🔁 초기화: 메뉴로 복귀 \n 기능을 선택하세요:\n 1. 식판 적재\n 2. 식판 회수\n 3. (실행 중 언제든) 일시정지")
+
 
     def pulse_bool(self, pub, ms: int = 250, value: bool = True):
         pub.publish(Bool(data=value))
@@ -174,9 +180,9 @@ class CoordinatorNode(Node):
     def _choose_function_blocking(self):
         self._in_menu = True
         try:
-            print("\n🌟 기능을 선택하세요:")
-            print("  1. 식판 적재 (101~117)")
-            print("  2. 식판 회수 (201~214)")
+            print("\n\U0001f31f 기능을 선택하세요:")
+            print("  1. 식판 적재")
+            print("  2. 식판 회수")
             print("  3. (실행 중 언제든) 일시정지")
             while True:
                 try:
@@ -255,7 +261,7 @@ class CoordinatorNode(Node):
         with self._pause_lock:
             self._paused = False
 
-        self.get_logger().info(f"🔁 기능 전환: {name} 시작")
+        self.get_logger().info(f"\U0001f501 기능 전환: {name} 시작")
 
         time.sleep(1.0)
         self.start_step()
@@ -274,7 +280,7 @@ class CoordinatorNode(Node):
         self.pub_a.publish(msg)
         self.pub_b.publish(msg)
         self.last_step_sent = time.time()
-        self.get_logger().info(f"📤 STEP {self.current_step} 전송 → A, B")
+        self.gui_log(f"\U0001f4e4 STEP {self.current_step} 전송 → A, B")
 
     def cb_a_ready(self, msg):
         step = int(msg.data)
@@ -306,7 +312,7 @@ class CoordinatorNode(Node):
                 self.pub_go.publish(Int32(data=int(self.current_step)))
                 self.last_go_sent = time.time()
                 self.go_sent_once = True
-                self.get_logger().info(f"🚦 GO {self.current_step} 발행")
+                self.get_logger().info(f"\U0001f6a6 GO {self.current_step} 발행")
             self.waiting_ready = False
 
     def tick(self):
@@ -327,7 +333,7 @@ class CoordinatorNode(Node):
             return
 
         if self.a_done == self.current_step and self.b_done == self.current_step:
-            self.get_logger().info(f"🎉 STEP {self.current_step} 완료")
+            self.get_logger().info(f"\U0001f389 STEP {self.current_step} 완료")
             self.idx += 1
             if self.idx >= len(self.step_list):
                 self.get_logger().info("🏁 모든 STEP 완료 → 기능 선택으로 복귀")
@@ -335,6 +341,11 @@ class CoordinatorNode(Node):
                 self._menu_start_evt.set()
             else:
                 self.start_step()
+
+    def gui_log(self, text: str):
+        print(text)
+        self.get_logger().info(text)
+        self.pub_gui_log.publish(String(data=text))
 
 
 def main(args=None):
@@ -350,3 +361,19 @@ def main(args=None):
 
 if __name__ == '__main__':
     main()
+
+
+class GuiLogger:
+    def __init__(self, original_stdout, pub_gui_log):
+        self.original_stdout = original_stdout
+        self.pub_gui_log = pub_gui_log
+
+    def write(self, msg):
+        msg = msg.strip()
+        if msg:
+            self.original_stdout.write(msg + '\n')
+            if self.pub_gui_log:
+                self.pub_gui_log.publish(String(data=msg))
+
+    def flush(self):
+        self.original_stdout.flush()
