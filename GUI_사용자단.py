@@ -1,23 +1,27 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 from PyQt6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QGroupBox, QTextEdit, QLabel, QDialog
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QGroupBox, QTextEdit, QLabel
 )
-from PyQt6.QtGui import QPalette, QColor
-from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
 import logging
 from datetime import datetime
+import cv2
 
-# 로깅 설정
-logging.basicConfig(filename='user_log.txt', level=logging.INFO, 
+logging.basicConfig(filename='user_log.txt', level=logging.INFO,
                    format='%(asctime)s - %(levelname)s - %(message)s')
+
 
 class UserClientUI(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("양로원 식사 배달 로봇 사용자 인터페이스")
-        self.resize(1000, 800)
+        self.resize(1200, 800)
 
-        # 색상 팔레트 설정 (커스텀 색상)
+        # 색상 팔레트
         palette = QPalette()
         palette.setColor(QPalette.ColorRole.Window, QColor("#fff2cc"))
         palette.setColor(QPalette.ColorRole.WindowText, QColor("#647687"))
@@ -34,109 +38,151 @@ class UserClientUI(QMainWindow):
         main_layout.setContentsMargins(15, 15, 15, 15)
         main_layout.setSpacing(15)
 
-        # 상단 패널: 상태 정보
+        # QGroupBox 공통 스타일
+        groupbox_style = """
+        QGroupBox {
+            color:#647687;
+            border:2px solid #647687;
+            border-radius:10px;
+            font-size:18px;
+            background-color:#bac8d3;
+            margin-top: 30px;
+        }
+        QGroupBox::title {
+            subcontrol-origin: margin;
+            subcontrol-position: top center;
+            padding: 6px;
+        }
+        """
+
+        # 상단 패널: 로봇 상태
         status_group = QGroupBox("로봇 상태")
-        status_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        status_group.setStyleSheet(groupbox_style)
         status_layout = QHBoxLayout(status_group)
-        
-        self.status_labels = []
-        status_info = [
-            ("Pinky 1 상태", "대기 중"),
-            ("Pinky 2 상태", "대기 중"),
-            ("Pinky 3 상태", "대기 중"),
-            ("JetCobot 상태", "대기 중")
-        ]
-        
-        for name, status in status_info:
+
+        self.status_buttons = []
+        robot_names = ["Pinky 1", "Pinky 2", "Pinky 3", "JetCobot"]
+        for name in robot_names:
             widget = QWidget()
             layout = QVBoxLayout(widget)
             label_name = QLabel(name)
-            label_name.setStyleSheet("font-size: 16px; font-family: 'Arial';")
-            label_status = QLabel(status)
-            label_status.setStyleSheet("font-size: 24px; font-family: 'Arial'; font-weight: bold;")
+            label_name.setStyleSheet("font-size:16px; font-weight:bold;")
+            label_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            # 출발/정지 버튼（출발=浅色 cyan）
+            btn_status = QPushButton("정지")
+            btn_status.setCheckable(True)
+            btn_status.setStyleSheet("""
+                QPushButton {
+                    background-color: #e1d5e7;
+                    color: #647687;
+                    border-radius: 6px;
+                    border: 2px solid #647687;
+                    font-size: 20px;
+                    font-weight: bold;
+                }
+                QPushButton:checked {
+                    background-color: #80deea;  /* 出발时浅色 Cyan */
+                    color: white;
+                }
+            """)
+            btn_status.setFixedSize(160, 80)
+            btn_status.toggled.connect(lambda checked, b=btn_status: b.setText("출발" if checked else "정지"))
+
             layout.addWidget(label_name)
-            layout.addWidget(label_status)
-            self.status_labels.append(label_status)
+            layout.addWidget(btn_status, alignment=Qt.AlignmentFlag.AlignCenter)
+            self.status_buttons.append(btn_status)
             status_layout.addWidget(widget)
 
         main_layout.addWidget(status_group)
 
-        # 중앙 패널: 제어 버튼
+        # 중앙 패널: 101~103호 요청
         control_group = QGroupBox("식사 배달 요청")
-        control_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
-        control_layout = QGridLayout(control_group)
+        control_group.setStyleSheet(groupbox_style)
+        control_layout = QVBoxLayout(control_group)
 
-        room_buttons = [
-            ("101호 식사 요청", lambda: self.request_meal(101)),
-            ("102호 식사 요청", lambda: self.request_meal(102)),
-            ("103호 식사 요청", lambda: self.request_meal(103)),
-            ("104호 식사 요청", lambda: self.request_meal(104)),
-            ("105호 식사 요청", lambda: self.request_meal(105)),
-            ("106호 식사 요청", lambda: self.request_meal(106)),
-            ("107호 식사 요청", lambda: self.request_meal(107)),
-            ("108호 식사 요청", lambda: self.request_meal(108))
-        ]
-        
-        for i, (text, func) in enumerate(room_buttons):
-            btn = QPushButton(text)
-            btn.setStyleSheet("background-color: #e1d5e7; color: #647687; border-radius: 6px; padding: 15px; font-size: 18px; font-family: 'Arial'; border: 2px solid #647687;")
+        for room in [101, 102, 103]:
+            btn = QPushButton(f"{room}호 식사 요청")
+            btn.setStyleSheet("background-color:#e1d5e7; color:#647687; border-radius:6px; font-size:20px; font-weight:bold; border:2px solid #647687;")
             btn.setFixedHeight(100)
-            btn.clicked.connect(func)
-            control_layout.addWidget(btn, i // 4, i % 4)
+            btn.clicked.connect(lambda checked, r=room: self.request_meal(r))
+            control_layout.addWidget(btn)
 
         main_layout.addWidget(control_group)
 
-        # 하단 패널: 알림 및 로그
+        # 카메라 패널
+        camera_group = QGroupBox("실시간 카메라 화면")
+        camera_group.setStyleSheet(groupbox_style)
+        camera_layout = QVBoxLayout(camera_group)
+        self.camera_label = QLabel()
+        self.camera_label.setFixedHeight(400)
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setStyleSheet("background-color:black; border-radius:6px;")
+        camera_layout.addWidget(self.camera_label)
+        main_layout.addWidget(camera_group)
+
+        # 하단 패널: 알림 + 로그
         bottom_widget = QWidget()
         bottom_layout = QHBoxLayout(bottom_widget)
         bottom_layout.setSpacing(15)
 
-        # 알림 그룹
         alert_group = QGroupBox("알림")
-        alert_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        alert_group.setStyleSheet(groupbox_style)
         alert_layout = QVBoxLayout(alert_group)
         self.alert_text = QTextEdit()
-        self.alert_text.setStyleSheet("background-color: #fff2cc; color: #647687; border: 2px solid #647687; border-radius: 6px; font-size: 14px; font-family: 'Arial';")
         self.alert_text.setReadOnly(True)
+        self.alert_text.setStyleSheet("font-size:14px; background-color:#fff2cc;")
         alert_layout.addWidget(self.alert_text)
 
-        # 로그 그룹
         log_group = QGroupBox("요청 기록")
-        log_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px; font-family: 'Arial'; background-color: #bac8d3;")
+        log_group.setStyleSheet(groupbox_style)
         log_layout = QVBoxLayout(log_group)
         self.log_text = QTextEdit()
-        self.log_text.setStyleSheet("background-color: #fff2cc; color: #647687; border: 2px solid #647687; border-radius: 6px; font-size: 14px; font-family: 'Arial';")
         self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("font-size:14px; background-color:#fff2cc;")
         log_layout.addWidget(self.log_text)
 
         bottom_layout.addWidget(alert_group, stretch=1)
         bottom_layout.addWidget(log_group, stretch=1)
-        main_layout.addWidget(bottom_widget)
+        main_layout.addWidget(bottom_widget, stretch=1)
 
-        # 초기 로그
+        # 카메라 시작
+        self.cap = cv2.VideoCapture(0)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.update_camera)
+        self.timer.start(30)
+
         self.log_action("사용자 인터페이스 초기화 완료")
 
     def request_meal(self, room_number):
         message = f"{room_number}호 식사 배달 요청"
         self.log_action(message)
         self.alert_action(f"{room_number}호 식사 배달이 시작되었습니다")
-        self.update_status(f"Pinky {room_number % 3 + 1}", f"{room_number}호 배달 중")
-
-    def update_status(self, robot_name, status):
-        index = ["Pinky 1", "Pinky 2", "Pinky 3", "JetCobot"].index(robot_name)
-        if index >= 0:
-            self.status_labels[index].setText(status)
 
     def log_action(self, message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        log_message = f"[{timestamp}] {message}"
-        self.log_text.append(log_message)
+        self.log_text.append(f"[{timestamp}] {message}")
         logging.info(message)
 
     def alert_action(self, message):
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        alert_message = f"[{timestamp}] {message}"
-        self.alert_text.append(alert_message)
+        self.alert_text.append(f"[{timestamp}] {message}")
+
+    def update_camera(self):
+        ret, frame = self.cap.read()
+        if ret:
+            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            h, w, ch = frame.shape
+            qimg = QImage(frame.data, w, h, ch * w, QImage.Format.Format_RGB888)
+            self.camera_label.setPixmap(QPixmap.fromImage(qimg).scaled(
+                self.camera_label.width(), self.camera_label.height(),
+                Qt.AspectRatioMode.KeepAspectRatio))
+
+    def closeEvent(self, event):
+        if self.cap.isOpened():
+            self.cap.release()
+        event.accept()
+
 
 if __name__ == "__main__":
     app = QApplication([])
