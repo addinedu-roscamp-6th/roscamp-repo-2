@@ -62,12 +62,12 @@ class RobotA1Node(Node):
             depth=1,
         )
 
-        # HW
+        # ── HW
         self.mc = MyCobot280('/dev/ttyJETCOBOT', 1000000)
         self.mc.thread_lock = True
         self.get_logger().info("🤖 JetCobot A 연결 완료")
 
-        # 상태
+        # ── 상태
         self.step_running = threading.Event()
         self.waiting_barrier = False
         self.executing_step = None
@@ -76,19 +76,33 @@ class RobotA1Node(Node):
         self.worker_thread = None
         self.step_done = False
 
-        # 일시정지/복구 상태
+        # 일시정지/복구
         self._pause_event = threading.Event()
         self._resume_lock = threading.Lock()
-        self._last_cmd = None          # ("angles", angles, speed, None) 등
+        self._last_cmd = None
         self._need_resume = False
 
-        # Pub/Sub
+        # 부팅/초기화 준비 상태
+        self._boot_ready = threading.Event()
+        self._boot_thread = None
+
+        # 일시정지 후 반드시 준비 복귀
+        self._post_pause_needs_ready = False
+        self._post_pause_thread = None
+
+        # ★ 초기화 직후 첫 STEP 제한(101/201만 허용)
+        self._after_reset_only_first_steps = True
+        self._after_reset_guard_on = False
+
+        # ── Pub/Sub
         self.done_pub = self.create_publisher(Int32, '/a_1_done', self.qos1)
         self.ready_pub = self.create_publisher(Int32, '/a_ready_step', self.qos1)
         self.create_subscription(Int32, '/robot_a_1_node', self.step_callback, self.qos1)
         self.create_subscription(Int32, '/go_step', self.go_callback, self.qos1)
         self.create_subscription(Bool, '/a_pause', self.pause_callback, self.qos1)
         self.create_subscription(Bool, '/a_move_ready', self.move_ready_callback, self.qos1)
+        # ★ 4번(초기화) 신호: True 수신 시 즉시 Zero Pose 이동
+        self.create_subscription(Bool, '/a_reset', self.reset_callback, self.qos1)
 
         # 타이머
         self.create_timer(0.3, self.tick_timeout)
@@ -108,6 +122,10 @@ class RobotA1Node(Node):
 
         self.BASIC_POSE = [0, 55, -90, -55, 6, -45]
         self.READY_POSE = [0, 0, -70, -20, 0, 45, 100]
+
+        # ★ 초기화 시 이동할 "제로 포즈"(관절 0도) — 나중에 여기만 바꾸면 됨
+        #    예: 모든 관절 0도, 그리퍼는 100
+        self.RESET_ZERO_POSE = [0, 0, -70, -20, 0, 45, 100]  # <-- 초기화 포즈 변경하려면 이 줄만 수정
 
         # 동작 맵 (그대로)
         self.action_map = {
@@ -145,7 +163,7 @@ class RobotA1Node(Node):
             214: [0, 0, -70, -20, 0, 45, 100],
         }
 
-        # ───────── 카메라 항상 켜기 + 실시간 마커 검출 상태 ─────────
+        # ── 카메라 & 웹
         self._cap = cv2.VideoCapture(0)
         if self._cap.isOpened():
             self._cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
@@ -156,12 +174,10 @@ class RobotA1Node(Node):
         else:
             self.get_logger().error("카메라 열기 실패(/dev/video0)")
 
-        # ArUco 준비
         self._aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_5X5_50)
         try:    self._aruco_params = cv2.aruco.DetectorParameters()
         except: self._aruco_params = cv2.aruco.DetectorParameters_create()
 
-        # 안정성 판정 상태
         self._marker_lock = threading.Lock()
         self._marker_seen = False
         self._marker_last_rvec = None
@@ -174,12 +190,16 @@ class RobotA1Node(Node):
         self._tvec_filt = None
         self._stable_time_needed = 1.0
 
-        # 카메라 스레드 + 웹
         self._cam_thread = threading.Thread(target=self._camera_loop, daemon=True)
         self._cam_thread.start()
         start_web()
 
-    # ───────── 체크포인트 래퍼(복구 핵심) ─────────
+        # 부팅 직후 준비자세(원 코드 유지)
+        self.get_logger().info("🚀 부팅: 준비자세로 이동합니다…")
+        self._boot_thread = threading.Thread(target=self._boot_ready_sequence, daemon=True)
+        self._boot_thread.start()
+
+    # ───────── 체크포인트 래퍼 ─────────
     def _ckpt_send_angles(self, angles, speed, save=True):
         if save:
             with self._resume_lock:
@@ -224,13 +244,14 @@ class RobotA1Node(Node):
             finally:
                 self._need_resume = False
 
-    # ───────── 일시정지/준비자세 콜백 ─────────
+    # ───────── 일시정지/준비/초기화 콜백 ─────────
     def pause_callback(self, msg: Bool):
         if msg.data:
             self.get_logger().warn("⏸ 일시정지 수신: 현재 동작 정지")
-            self._pause_event.set()
             try: self.mc.stop()
             except Exception: pass
+            self._pause_event.set()
+            self._post_pause_needs_ready = True
             with self._resume_lock:
                 self._need_resume = True
         else:
@@ -240,26 +261,89 @@ class RobotA1Node(Node):
     def move_ready_callback(self, msg: Bool):
         if msg.data:
             self.get_logger().info("🟦 준비자세 이동 명령 수신")
-            threading.Thread(target=self._move_to_ready_safe, daemon=True).start()
+            def _do():
+                self._move_to_ready_blocking(self.READY_POSE)
+                self._post_pause_needs_ready = False
+                self._boot_ready.set()
+                self.ready_pub.publish(Int32(data=0))
+            threading.Thread(target=_do, daemon=True).start()
+
+    # ★ 초기화(버튼 4): 즉시 "관절 0도 포즈"로 이동
+    def reset_callback(self, msg: Bool):
+        if not msg.data:
+            return
+        self.get_logger().warn("🔄 초기화 명령 수신:이동합니다")
+        def _reset_seq():
+            # 내부 상태 클리어
+            self._boot_ready.clear()
+            self.waiting_barrier = False
+            self.step_running.clear()
+            self.executing_step = None
+            self.pending_step = None
+            self.step_done = False
+            self._after_reset_guard_on = True  # 초기화 직후 첫 STEP 가드 활성화
+
+            try: self.mc.stop()
+            except Exception: pass
+            self._pause_event.clear()
+
+            # ★ 여기서 사용하는 초기화 포즈는 self.RESET_ZERO_POSE 입니다.
+            #    나중에 0도 대신 다른 각도로 바꾸려면 self.RESET_ZERO_POSE만 변경하세요.
+            self._move_to_ready_blocking(self.RESET_ZERO_POSE)
+
+            # 준비 완료 알림
+            self._boot_ready.set()
+            self.ready_pub.publish(Int32(data=0))
+            self.get_logger().info("🟢 초기화 완료: ZERO_POSE 도달, READY(0) 발행")
+        threading.Thread(target=_reset_seq, daemon=True).start()
+
+    # ───────── 이동 유틸 ─────────
+    def _move_to_ready_blocking(self, pose_with_grip):
+        try:
+            try: self.mc.stop()
+            except Exception: pass
+            angles = pose_with_grip[:6]
+            grip = pose_with_grip[6]
+            self._ckpt_send_angles(angles, self.FAST_SPEED, save=False)
+            self._wait_reached_angles(angles, timeout=10.0)
+            self._ckpt_set_gripper(grip, 40, save=False); time.sleep(0.3)
+            self.get_logger().info(f"✅ 이동 완료: {pose_with_grip}")
+        except Exception as e:
+            self.get_logger().error(f"❌ 이동 실패: {e}")
+
+    def _wait_reached_angles(self, target_deg, timeout=10.0, eps=2.0):
+        t_end = time.time() + timeout
+        last = None
+        while time.time() < t_end:
+            self._wait_if_paused()
+            try:
+                cur = self.mc.get_angles()
+                if cur:
+                    last = cur[:6]
+                    if all(abs((last[i] or 0) - target_deg[i]) <= eps for i in range(6)):
+                        return True
+            except Exception:
+                pass
+            time.sleep(0.1)
+        if last:
+            self.get_logger().warn(f"현재각(미도달): {[round(x,1) for x in last]}")
+        return False
 
     def _wait_if_paused(self):
         while self._pause_event.is_set():
             time.sleep(0.05)
         self._reissue_last_cmd_if_needed()
 
-    def _move_to_ready_safe(self):
+    def _boot_ready_sequence(self):
         try:
-            try: self.mc.stop()
-            except Exception: pass
-            angles = self.READY_POSE[:6]
-            grip = self.READY_POSE[6]
-            self._ckpt_send_angles(angles, self.FAST_SPEED, save=False); time.sleep(0.6)
-            self._ckpt_set_gripper(grip, 40, save=False); time.sleep(0.4)
-            self.get_logger().info(f"✅ 준비자세 이동 완료: {self.READY_POSE}")
+            self._move_to_ready_blocking(self.READY_POSE)
+            self._boot_ready.set()
+            self.ready_pub.publish(Int32(data=0))
+            self.get_logger().info("🟢 부팅-준비 완료: READY(0) 발행")
         except Exception as e:
-            self.get_logger().error(f"❌ 준비자세 이동 실패: {e}")
+            self.get_logger().error(f"❌ 부팅-준비 실패: {e}")
 
-    # ───────── 카메라 루프 (그대로) ─────────
+    # ───────── 카메라 루프 (생략 없이 유지) ─────────
     def _camera_loop(self):
         objp = np.array([
             [-self.MARKER_LEN/2,  self.MARKER_LEN/2, 0],
@@ -269,7 +353,6 @@ class RobotA1Node(Node):
         ], dtype=np.float32)
 
         global _latest_frame, _frame_lock
-
         while True:
             ok, fr = self._cap.read()
             if not ok:
@@ -290,20 +373,13 @@ class RobotA1Node(Node):
                     else:
                         self._tvec_filt = (1.0 - self._filter_alpha) * self._tvec_filt + self._filter_alpha * t
                     t_use = self._tvec_filt
-
                     with self._marker_lock:
                         if self._marker_anchor_t is None:
-                            self._marker_anchor_t = t_use.copy()
-                            self._marker_anchor_ts = time.time()
+                            self._marker_anchor_t = t_use.copy(); self._marker_anchor_ts = time.time()
                         else:
                             dev = np.linalg.norm(t_use - self._marker_anchor_t)
-                            if dev <= self._pos_eps:
-                                pass
-                            elif dev >= self._pos_eps_reset:
-                                self._marker_anchor_t = t_use.copy()
-                                self._marker_anchor_ts = time.time()
-                            else:
-                                pass
+                            if dev >= self._pos_eps_reset:
+                                self._marker_anchor_t = t_use.copy(); self._marker_anchor_ts = time.time()
                         self._marker_seen = True
                         self._marker_last_rvec = rvec
                         self._marker_last_tvec = t_use.reshape(3, 1)
@@ -367,7 +443,7 @@ class RobotA1Node(Node):
     @staticmethod
     def clamp(v, lo, hi): return lo if v < lo else (hi if v > hi else v)
 
-    # ───────── CODE1 (기존) ─────────
+    # ───────── CODE1 (그대로) ─────────
     def to_marker_basic(self):
         self._wait_if_paused()
         ok = self.wait_marker_stable(still_time=0.5, pos_eps=None, timeout=20.0)
@@ -456,35 +532,86 @@ class RobotA1Node(Node):
         self.to_marker_basic()
         self.get_logger().info("🧩 코드1 기능 완료")
 
-    # ───────── 배리어/스텝(그대로) ─────────
+    # ───────── 배리어/스텝 ─────────
     def step_callback(self, msg):
         step = int(msg.data)
+        self.get_logger().info(f"📨 STEP 수신: {step}")
+
+        # 초기화 직후 첫 STEP 제한 (옵션)
+        if self._after_reset_guard_on and self._after_reset_only_first_steps:
+            if step not in (101, 201):
+                self.get_logger().warn(f"🚫 초기화 직후에는 101/201만 허용. 받은 STEP={step} → 무시")
+                return
+            else:
+                self.get_logger().info("✅ 초기화 가드 해제")
+                self._after_reset_guard_on = False
+
+        # 일시정지 이후 준비 복귀 필요 시
+        if self._post_pause_needs_ready:
+            if (self._post_pause_thread is None) or (not self._post_pause_thread.is_alive()):
+                self.get_logger().warn("🔄 일시정지 이후 첫 입력 → 준비자세 복귀부터")
+                self._boot_ready.clear()
+                self._post_pause_thread = threading.Thread(
+                    target=lambda: self._move_to_ready_blocking(self.READY_POSE), daemon=True
+                )
+                self._post_pause_thread.start()
+                # READY(0) 통지
+                def _notify():
+                    self._post_pause_thread.join()
+                    self._post_pause_needs_ready = False
+                    self._boot_ready.set()
+                    self.ready_pub.publish(Int32(data=0))
+                    self.get_logger().info("🟢 준비자세 복귀 완료: READY(0) 발행")
+                threading.Thread(target=_notify, daemon=True).start()
+            # 큐잉은 하지 않음(레이스 방지). 코디네이터가 다시 보냄.
+            return
+
+        # 준비 완료 전에는 큐잉만
+        if not self._boot_ready.is_set():
+            if self.pending_step != step:
+                self.pending_step = step
+                self.get_logger().warn(f"⏳ 준비 미완료 → Step {step} 큐잉, READY 미발행")
+            return
+
         if self.step_running.is_set() or self.waiting_barrier:
-            if step != self.executing_step:
+            if step != self.executing_step and self.pending_step != step:
                 self.pending_step = step
                 self.get_logger().warn(f"🧺 실행/대기 중({self.executing_step}) → Step {step} 큐잉")
             return
+
+        if step not in self.action_map:
+            self.get_logger().error(f"❌ 알 수 없는 STEP: {step}")
+            return
+
         self.executing_step = step
         self.step_done = False
         self.last_step_time = time.time()
         self.waiting_barrier = True
         self.ready_pub.publish(Int32(data=step))
-        self.get_logger().info(f"🟡 READY 전송: {step} (GO 대기)")
+        self.get_logger().info(f"🟡 READY 전송: step={step} (GO 대기)")
 
     def go_callback(self, msg):
         go = int(msg.data)
-        if self.waiting_barrier and go == self.executing_step:
-            self.waiting_barrier = False
-            self.step_running.set()
-            if (go in self.action_map and self.action_map[go] == "CODE1"):
-                self.worker_thread = threading.Thread(target=self.execute_code1_step, args=(go,), daemon=True)
-            else:
-                self.worker_thread = threading.Thread(target=self.execute_step, args=(go,), daemon=True)
-            self.worker_thread.start()
+        self.get_logger().info(f"📨 GO 수신: {go} (executing_step={self.executing_step})")
+        if not self.waiting_barrier:
+            self.get_logger().warn("⚠️ GO 수신했지만 배리어 상태가 아님 → 무시")
+            return
+        if go != self.executing_step:
+            self.get_logger().warn("🚫 GO가 현재 실행 예정 Step과 불일치 → 무시")
+            return
+
+        self.waiting_barrier = False
+        self.step_running.set()
+        if (go in self.action_map and self.action_map[go] == "CODE1"):
+            self.get_logger().info(f"▶ CODE1 실행 시작 (step={go})")
+            self.worker_thread = threading.Thread(target=self.execute_code1_step, args=(go,), daemon=True)
+        else:
+            self.get_logger().info(f"▶ 일반 동작 실행 시작 (step={go})")
+            self.worker_thread = threading.Thread(target=self.execute_step, args=(go,), daemon=True)
+        self.worker_thread.start()
 
     def execute_code1_step(self, step):
         try:
-            # 성공할 때까지 재시도, 성공 시에만 DONE
             while True:
                 try:
                     self.run_code1_feature()
@@ -516,7 +643,6 @@ class RobotA1Node(Node):
             self._ckpt_set_gripper(angles[6], 30)
 
             if step in (101, 201):
-                # 성공할 때까지 반복 대기
                 while True:
                     self._wait_if_paused()
                     self.get_logger().info(f"🔍 Step {step}: 마커 0.5s 안정 대기…")
@@ -536,7 +662,6 @@ class RobotA1Node(Node):
             self.get_logger().error(f"❌ Step {step} 실패: {e}")
         finally:
             self.step_running.clear()
-            # 성공한 경우에만 DONE 발행
             if self.step_done:
                 self.done_pub.publish(Int32(data=int(step)))
                 self.executing_step = None
