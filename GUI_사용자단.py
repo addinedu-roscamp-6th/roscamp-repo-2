@@ -14,7 +14,6 @@ import cv2
 logging.basicConfig(filename='user_log.txt', level=logging.INFO,
                    format='%(asctime)s - %(levelname)s - %(message)s')
 
-
 class UserClientUI(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -69,7 +68,7 @@ class UserClientUI(QMainWindow):
             label_name.setStyleSheet("font-size:16px; font-weight:bold;")
             label_name.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-            # 출발/정지 버튼（출발=浅色 cyan）
+            # 출발/정지 버튼（统一风格，출발=cyan）
             btn_status = QPushButton("정지")
             btn_status.setCheckable(True)
             btn_status.setStyleSheet("""
@@ -82,13 +81,12 @@ class UserClientUI(QMainWindow):
                     font-weight: bold;
                 }
                 QPushButton:checked {
-                    background-color: #80deea;  /* 出발时浅色 Cyan */
+                    background-color: #00bcd4;  /* 출발时 cyan */
                     color: white;
                 }
             """)
             btn_status.setFixedSize(160, 80)
-            btn_status.toggled.connect(lambda checked, b=btn_status: b.setText("출발" if checked else "정지"))
-
+            btn_status.toggled.connect(lambda checked, b=btn_status, n=name: b.setText("출발" if checked and n != "JetCobot" else "실행" if checked else "정지"))
             layout.addWidget(label_name)
             layout.addWidget(btn_status, alignment=Qt.AlignmentFlag.AlignCenter)
             self.status_buttons.append(btn_status)
@@ -182,7 +180,6 @@ class UserClientUI(QMainWindow):
         if self.cap.isOpened():
             self.cap.release()
         event.accept()
-
 
 if __name__ == "__main__":
     app = QApplication([])
