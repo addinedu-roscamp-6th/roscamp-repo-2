@@ -1,22 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+# ── (선택) Qt 로그 간소화 ────────────────────────────────────────────────
+import os
+os.environ["QT_LOGGING_RULES"] = "*.debug=false;*.info=false;qt.qpa.*=false"
+# ───────────────────────────────────────────────────────────────────────
+
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QGroupBox, QTextEdit, QLabel
 )
 from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, qInstallMessageHandler
+qInstallMessageHandler(lambda *args: None)  # Qt 메시지 무음 (원치 않으면 주석)
 
 import sys
 from datetime import datetime
 import math
+import urllib.request  # ← MJPEG HTTP 파싱에 사용
 
 # ===== ROS2 =====
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSPresetProfiles
-from std_msgs.msg import String, Bool
+from std_msgs.msg import String, Bool, Int32
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import Image
 from cv_bridge import CvBridge
@@ -34,6 +41,9 @@ POSE_TOPICS = {
     "Pinky-3": "/marker_map/ID27",
 }
 CELL_W, CELL_H = 640, 360
+
+# 로봇팔 웹 스트림(MJPEG) 주소 - Flask의 /video_feed
+JETCOBOT_STREAM_URL = "http://192.168.247.164:9816/video_feed"
 
 
 class RosBridge(Node):
@@ -98,6 +108,9 @@ class RosBridge(Node):
         self.gui_append_alert = None
         self.gui_set_pose_text = None
 
+        # Coordinator 로그 구독
+        self.sub_coord_log = self.create_subscription(String, '/coordinator/gui_log', self._cb_coord_log, 10)
+
     # ===== 콜백들 =====
     def _make_img_cb(self, name: str):
         def _cb(msg: Image):
@@ -133,10 +146,11 @@ class RosBridge(Node):
         self._alert_gui(msg.data)
 
     # ===== GUI 훅 =====
-    def set_callbacks(self, append_log, append_alert, set_pose_text):
+    def set_callbacks(self, append_log, append_alert, set_pose_text, append_coord_log):
         self.gui_append_log = append_log
         self.gui_append_alert = append_alert
         self.gui_set_pose_text = set_pose_text
+        self.gui_append_coord_log = append_coord_log
 
     # ===== 유틸 =====
     def _log_gui(self, text: str):
@@ -151,21 +165,12 @@ class RosBridge(Node):
     # ===== ✅ Pinky1/2/3 전용 Bool 명령 =====
     def _send_goal(self, robot: int, goal_name: str):
         table = {
-            1: {
-                "kitchen": self.pub_p1_kitchen, "serving": self.pub_p1_serving,
-                "charge": self.pub_p1_charge,   "room":    self.pub_p1_room,
-                "recall": self.pub_p1_recall,   "return":  self.pub_p1_return,
-            },
-            2: {
-                "kitchen": self.pub_p2_kitchen, "serving": self.pub_p2_serving,
-                "charge": self.pub_p2_charge,   "room":    self.pub_p2_room,
-                "recall": self.pub_p2_recall,   "return":  self.pub_p2_return,
-            },
-            3: {
-                "kitchen": self.pub_p3_kitchen, "serving": self.pub_p3_serving,
-                "charge": self.pub_p3_charge,   "room":    self.pub_p3_room,
-                "recall": self.pub_p3_recall,   "return":  self.pub_p3_return,
-            },
+            1: {"kitchen": self.pub_p1_kitchen, "serving": self.pub_p1_serving, "charge": self.pub_p1_charge,
+                "room": self.pub_p1_room, "recall": self.pub_p1_recall, "return": self.pub_p1_return},
+            2: {"kitchen": self.pub_p2_kitchen, "serving": self.pub_p2_serving, "charge": self.pub_p2_charge,
+                "room": self.pub_p2_room, "recall": self.pub_p2_recall, "return": self.pub_p2_return},
+            3: {"kitchen": self.pub_p3_kitchen, "serving": self.pub_p3_serving, "charge": self.pub_p3_charge,
+                "room": self.pub_p3_room, "recall": self.pub_p3_recall, "return": self.pub_p3_return},
         }
         pub = table.get(robot, {}).get(goal_name)
         if pub is None:
@@ -181,6 +186,10 @@ class RosBridge(Node):
             return
         pub.publish(Bool(data=True))
         self._log_gui(f"[Pinky{robot}] /pinky{robot}/stop = True  (브릿지→/stop)")
+
+    def _cb_coord_log(self, msg: String):
+        if hasattr(self, "gui_append_coord_log") and self.gui_append_coord_log:
+            self.gui_append_coord_log(msg.data)
 
     def send_p1_goal(self, goal_name: str): self._send_goal(1, goal_name)
     def send_p2_goal(self, goal_name: str): self._send_goal(2, goal_name)
@@ -222,23 +231,45 @@ class GUI(QMainWindow):
         left_layout = QGridLayout(left_widget)
         left_layout.setSpacing(8)
 
-        self.video_labels: dict[str, QLabel] = {}
-        positions = [(0,0), (0,1), (1,0), (1,1)]
-        for (row, col), name in zip(positions, self.image_names):
-            box = QGroupBox(f"{name} ({image_topics[name]})")
-            box.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 16px;")
-            box_layout = QVBoxLayout(box)
-            lbl = QLabel(f"{name} 대기중…")
-            lbl.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px; color: #647687;")
-            lbl.setFixedSize(CELL_W, CELL_H)
-            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            box_layout.addWidget(lbl)
-            left_layout.addWidget(box, row, col)
-            self.video_labels[name] = lbl
+        # ✅ JetCobot 영상: GroupBox 포함
+        jet_group = QGroupBox("JetCobot MJPEG 스트리밍")
+        jet_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px;")
+        jet_layout = QVBoxLayout(jet_group)
 
+        self.image_jetcobot = QLabel("JetCobot 대기중…")
+        self.image_jetcobot.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px; color: #647687;")
+        self.image_jetcobot.setFixedSize(CELL_W, CELL_H)
+        self.image_jetcobot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        jet_layout.addWidget(self.image_jetcobot)
+        left_layout.addWidget(jet_group, 2, 1)
+
+        # ✅ 현재 위치
         self.pose_label = QLabel("현재 위치: -")
         self.pose_label.setStyleSheet("color: #374151; font-size: 16px;")
-        left_layout.addWidget(self.pose_label, 2, 0, 1, 2)
+        left_layout.addWidget(self.pose_label, 2, 0)
+
+        # ✅ MJPEG(HTTP) 파싱용 버퍼 & 연결
+        self._http_buf = bytearray()
+        self._http_conn = None
+
+        # JetCobot 업데이트 타이머
+        self.jet_timer = QTimer()
+        self.jet_timer.timeout.connect(self.update_jetcobot_stream_http)
+        self.jet_timer.start(33)  # ~30fps
+
+        # ROS 스핀 타이머
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._on_timer)
+        self.timer.start(100)
+
+        # ROS ↔ GUI 콜백 연동
+        self.ros.set_callbacks(
+            append_log=self.log_action,
+            append_alert=self.alert_action,
+            set_pose_text=self.pose_label.setText,
+            append_coord_log=self.append_coord_log
+        )
+
         main_layout.addWidget(left_widget, stretch=1)
 
         # 우측: 알림/제어/로그
@@ -262,12 +293,12 @@ class GUI(QMainWindow):
         ctrl_layout = QGridLayout(ctrl_group)
 
         bool_cmds = [
-            ("주방",   "kitchen"),
+            ("주방", "kitchen"),
             ("배식대", "serving"),
             ("충전소", "charge"),
-            ("방",     "room"),
-            ("리콜",   "recall"),
-            ("복귀",   "return"),
+            ("방", "room"),
+            ("리콜", "recall"),
+            ("복귀", "return"),
         ]
         base_row = 0
         for i, (label, goal) in enumerate(bool_cmds):
@@ -300,22 +331,20 @@ class GUI(QMainWindow):
         btn_p3_stop.clicked.connect(lambda _: self.ros.send_p3_stop())
         ctrl_layout.addWidget(btn_p3_stop, base_row + len(bool_cmds), 4)
 
-        from functools import partial
-        from std_msgs.msg import Int32
-        self.coordinator_pub = self.ros.create_publisher(Int32, '/coordinator/command', 10)
-
-        # Coordinator 버튼을 별도 QGroupBox에 수평으로 배치
+        # Coordinator 제어
         coordinator_box = QGroupBox("Coordinator 제어")
         coordinator_box.setStyleSheet("color: #647687; border: 2px solid #4CAF50; border-radius: 10px; font-size: 18px;")
         coordinator_layout = QHBoxLayout(coordinator_box)
         coordinator_layout.setSpacing(10)
         coordinator_layout.setContentsMargins(10, 10, 10, 10)
 
+        self.coordinator_pub = self.ros.create_publisher(Int32, '/coordinator/command', 10)
+
         def add_coord_btn(label: str, cmd: int):
             btn = QPushButton(label)
             btn.setMinimumHeight(45)
             btn.setStyleSheet("background-color: #D5E8D4; border-radius: 6px; padding: 10px; font-size: 16px; border: 1px solid #4CAF50;")
-            btn.clicked.connect(partial(lambda c: self.coordinator_pub.publish(Int32(data=c)), cmd))
+            btn.clicked.connect(lambda _, c=cmd: self.coordinator_pub.publish(Int32(data=c)))
             coordinator_layout.addWidget(btn)
 
         add_coord_btn("식판 적재", 1)
@@ -323,7 +352,7 @@ class GUI(QMainWindow):
         add_coord_btn("일시정지", 3)
         add_coord_btn("초기화", 4)
 
-        # 로그
+        # 작업 로그
         log_group = QGroupBox("작업 로그 (/gui/log)")
         log_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px;")
         log_layout = QVBoxLayout(log_group)
@@ -332,25 +361,93 @@ class GUI(QMainWindow):
         self.log_text.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px;")
         log_layout.addWidget(self.log_text)
 
+        # Coordinator 로그
+        coord_log_group = QGroupBox("Coordinator 로그 (/coordinator/gui_log)")
+        coord_log_group.setStyleSheet("color: #647687; border: 2px solid #4CAF50; border-radius: 10px; font-size: 18px;")
+        coord_log_layout = QVBoxLayout(coord_log_group)
+        self.coord_log_text = QTextEdit()
+        self.coord_log_text.setReadOnly(True)
+        self.coord_log_text.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px;")
+        coord_log_layout.addWidget(self.coord_log_text)
+
+        # ==== 영상 QLabel들 추가 (QGroupBox로 감싸기) ====
+        self.video_labels = {}
+        for i, name in enumerate(self.image_names):
+            group = QGroupBox(f"{name} ({image_topics[name]})")
+            group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 8px; font-size: 14px;")
+            group_layout = QVBoxLayout(group)
+
+            label = QLabel(f"{name} 대기중…")
+            label.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px; color: #647687;")
+            label.setFixedSize(CELL_W, CELL_H)
+            label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+            group_layout.addWidget(label)
+
+            row, col = divmod(i, 2)
+            left_layout.addWidget(group, row, col)
+
+            self.video_labels[name] = label
+
+        # 우측 위젯에 추가
         right_layout.addWidget(alert_group)
         right_layout.addWidget(ctrl_group)
         right_layout.addWidget(coordinator_box)
         right_layout.addWidget(log_group)
+        right_layout.addWidget(coord_log_group)
         right_layout.addStretch()
         main_layout.addWidget(right_widget, stretch=1)
 
-        self.ros.set_callbacks(
-            append_log=self.log_action,
-            append_alert=self.alert_action,
-            set_pose_text=self.pose_label.setText
-        )
-
-        self.timer = QTimer()
-        self.timer.timeout.connect(self._on_timer)
-        self.timer.start(33)
-
         self.log_action("GUI 시작. 다중 카메라/포즈 구독; /pinkyN/go_to_*, /pinkyN/stop 퍼블리시")
 
+    # ── JetCobot 스트림 표시 (HTTP로 MJPEG 직접 파싱)
+    def update_jetcobot_stream_http(self):
+        try:
+            # 연결 없으면 접속 시도 (매 주기마다 1s timeout)
+            if self._http_conn is None:
+                req = urllib.request.Request(
+                    JETCOBOT_STREAM_URL,
+                    headers={'User-Agent': 'Mozilla/5.0'}
+                )
+                self._http_conn = urllib.request.urlopen(req, timeout=1.0)
+
+            # 데이터 조금씩 읽어서 JPEG 프레임 추출
+            chunk = self._http_conn.read(4096)
+            if chunk:
+                self._http_buf += chunk
+                while True:
+                    soi = self._http_buf.find(b'\xff\xd8')  # JPEG SOI
+                    eoi = self._http_buf.find(b'\xff\xd9')  # JPEG EOI
+                    if soi != -1 and eoi != -1 and eoi > soi:
+                        jpg = self._http_buf[soi:eoi+2]
+                        del self._http_buf[:eoi+2]
+
+                        img = QImage.fromData(jpg)
+                        if not img.isNull():
+                            pix = QPixmap.fromImage(img).scaled(
+                                self.image_jetcobot.width(),
+                                self.image_jetcobot.height(),
+                                Qt.AspectRatioMode.KeepAspectRatio
+                            )
+                            self.image_jetcobot.setPixmap(pix)
+                    else:
+                        break
+            else:
+                if self.image_jetcobot.pixmap() is None:
+                    self.image_jetcobot.setText("JetCobot 스트림 대기중…")
+
+        except Exception:
+            # 오류 시 연결 리셋 → 다음 주기에 재연결
+            try:
+                if self._http_conn:
+                    self._http_conn.close()
+            except:
+                pass
+            self._http_conn = None
+            self._http_buf.clear()
+            self.image_jetcobot.setText("JetCobot 연결 재시도…")
+
+    # ── ROS 스핀 & 이미지 표시
     def _on_timer(self):
         rclpy.spin_once(self.ros, timeout_sec=0.0)
         for name, qimg in self.ros.latest_qimages.items():
@@ -360,6 +457,11 @@ class GUI(QMainWindow):
             pix = QPixmap.fromImage(qimg.scaled(CELL_W, CELL_H, Qt.AspectRatioMode.KeepAspectRatio))
             lbl.setPixmap(pix)
 
+    # ── 로그/알림 UI 업데이트
+    def append_coord_log(self, message: str):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.coord_log_text.append(f"[Coordinator] [{ts}] {message}")
+
     def log_action(self, message: str):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.log_text.append(f"[{ts}] {message}")
@@ -368,14 +470,21 @@ class GUI(QMainWindow):
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         self.alert_text.append(f"[{ts}] {message}")
 
+    # ── 창 종료 처리
     def closeEvent(self, event):
         try:
+            try:
+                if self._http_conn:
+                    self._http_conn.close()
+            except:
+                pass
+            self._http_conn = None
+            self._http_buf.clear()
             self.ros.destroy_node()
             rclpy.shutdown()
         except Exception:
             pass
         super().closeEvent(event)
-
 
 
 def main():
