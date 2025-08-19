@@ -69,6 +69,11 @@ class CoordinatorNode(Node):
         self.pub_a_move_ready = self.create_publisher(Bool, '/a_move_ready', self.qos1)
         self.pub_b_move_ready = self.create_publisher(Bool, '/b_move_ready', self.qos1)
 
+        # __init__ 안의 발행자들 근처에 추가
+        self.pub_a_reset = self.create_publisher(Bool, '/a_reset', self.qos1)
+        self.pub_b_reset = self.create_publisher(Bool, '/b_reset', self.qos1)
+
+
         self.create_timer(0.2, self.tick)
 
         self._ensure_menu_thread()
@@ -159,6 +164,9 @@ class CoordinatorNode(Node):
         self._pause_input_waiting = False
         self._menu_start_evt.set()
         self.gui_log("🔁 초기화: 메뉴로 복귀 \n 기능을 선택하세요:\n 1. 식판 적재\n 2. 식판 회수\n 3. (실행 중 언제든) 일시정지")
+           # ★ 로봇에 리셋 신호 펄스 발행 (A/B 모두)
+        self.pulse_bool(self.pub_a_reset)   # True 한 번 쏘고 잠시 뒤 False
+        self.pulse_bool(self.pub_b_reset)
 
 
     def pulse_bool(self, pub, ms: int = 250, value: bool = True):
@@ -284,10 +292,15 @@ class CoordinatorNode(Node):
 
     def cb_a_ready(self, msg):
         step = int(msg.data)
-        cur = self.current_step if self.current_step is not None else -1
-        if step >= cur:
+        cur = self.current_step
+        if cur is None:
+            return
+        if step == cur:
             self.a_ready = step
             self._maybe_send_go()
+        else:
+            self.get_logger().warn(f"IGN A READY {step} (expect {cur})")
+
 
     def cb_b_ready(self, msg):
         step = int(msg.data)
