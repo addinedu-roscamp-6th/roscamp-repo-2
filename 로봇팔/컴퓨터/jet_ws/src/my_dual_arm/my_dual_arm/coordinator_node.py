@@ -26,35 +26,35 @@ class CoordinatorNode(Node):
         self.step_list = []
         self.idx = 0
 
-        # READY/DONE
         self.a_ready = -1
         self.b_ready = -1
         self.a_done = -1
         self.b_done = -1
         self.waiting_ready = False
 
-        # 타임스탬프
         self.last_step_sent = 0.0
         self.last_go_sent = 0.0
         self.go_sent_once = False
 
-        # 일시정지/입력 스레드 상태
         self._paused = False
         self._pause_lock = threading.Lock()
-
         self._menu_thread = None
         self._menu_start_evt = threading.Event()
         self._menu_alive = False
         self._cmd_thread_started = False
-        self._in_menu = False          # ← 입력 경쟁 방지용 플래그
+        self._in_menu = False
 
-        # 구독
+        # GUI 일시정지 상태 대응용
+        self._pause_input_waiting = False
+
+        # ─── 구독 ───
         self.create_subscription(Int32, '/a_1_done', self.cb_a_done, self.qos1)
         self.create_subscription(Int32, '/b_1_done', self.cb_b_done, self.qos1)
         self.create_subscription(Int32, '/a_ready_step', self.cb_a_ready, self.qos1)
         self.create_subscription(Int32, '/b_ready_step', self.cb_b_ready, self.qos1)
+        self.create_subscription(Int32, '/coordinator/command', self.cb_command, self.qos1)
 
-        # 발행
+        # ─── 발행 ───
         self.pub_a = self.create_publisher(Int32, '/robot_a_1_node', self.qos1)
         self.pub_b = self.create_publisher(Int32, '/robot_b_1_node', self.qos1)
         self.pub_go = self.create_publisher(Int32, '/go_step', self.qos1)
@@ -64,26 +64,101 @@ class CoordinatorNode(Node):
         self.pub_a_move_ready = self.create_publisher(Bool, '/a_move_ready', self.qos1)
         self.pub_b_move_ready = self.create_publisher(Bool, '/b_move_ready', self.qos1)
 
-        # 타이머
         self.create_timer(0.2, self.tick)
 
-        # 메뉴/커맨드 스레드 기동
         self._ensure_menu_thread()
-        self._menu_start_evt.set()  # 최초 메뉴 표시
+        self._menu_start_evt.set()
 
         if not self._cmd_thread_started:
             self._cmd_thread = threading.Thread(target=self._cmd_loop, daemon=True)
             self._cmd_thread.start()
             self._cmd_thread_started = True
 
-    # ─────────────────────────────────────────
-    # 유틸: Bool 펄스
+    def cb_command(self, msg):
+        cmd = int(msg.data)
+
+        if self._pause_input_waiting:
+            if cmd == 3:
+                self._unpause_from_any_source()
+            elif cmd == 4:
+                self._reset_from_any_source()
+            return
+
+        if cmd == 1:
+            self.select_function(1)
+        elif cmd == 2:
+            self.select_function(2)
+        elif cmd == 3:
+            self.trigger_pause()
+        elif cmd == 4:
+            self._reset_from_any_source()
+        elif cmd == 9:
+            self.get_logger().info("🛑 GUI 종료 명령 수신")
+            rclpy.shutdown()
+        else:
+            self.get_logger().warn(f"⚠️ 알 수 없는 명령: {cmd}")
+
+    def trigger_pause(self):
+        with self._pause_lock:
+            if self._paused:
+                print("⏸ 이미 일시정지 상태입니다.")
+                return
+            self._paused = True
+
+        self.get_logger().warn("⏸ 일시정지 요청")
+        self.pulse_bool(self.pub_a_pause)
+        self.pulse_bool(self.pub_b_pause)
+        self.pulse_bool(self.pub_a_move_ready)
+        self.pulse_bool(self.pub_b_move_ready)
+
+        self.get_logger().info("3=계속 / 4=초기화 명령 대기 중 (GUI 또는 콘솔 입력 가능)")
+        self._pause_input_waiting = True
+
+        threading.Thread(target=self._wait_console_input, daemon=True).start()
+
+    def _wait_console_input(self):
+        while self._pause_input_waiting:
+            try:
+                ans = input("3=계속 / 4=초기화 ? ").strip()
+            except EOFError:
+                time.sleep(0.1)
+                continue
+
+            if ans == '3':
+                self._unpause_from_any_source()
+                break
+            elif ans == '4':
+                self._reset_from_any_source()
+                break
+            else:
+                print("⚠️ '3' 또는 '4'만 입력하세요.")
+
+    def _unpause_from_any_source(self):
+        with self._pause_lock:
+            self._paused = False
+        self._pause_input_waiting = False
+        self.get_logger().info("▶ 계속 진행")
+
+    def _reset_from_any_source(self):
+        with self._pause_lock:
+            self._paused = False
+        self.current_step = None
+        self.step_list = []
+        self.idx = 0
+        self.a_ready = self.b_ready = -1
+        self.a_done = self.b_done = -1
+        self.waiting_ready = False
+        self.last_step_sent = 0.0
+        self.last_go_sent = 0.0
+        self.go_sent_once = False
+        self._pause_input_waiting = False
+        self._menu_start_evt.set()
+        self.get_logger().info("🔄 초기화: 메뉴로 복귀")
+
     def pulse_bool(self, pub, ms: int = 250, value: bool = True):
         pub.publish(Bool(data=value))
         threading.Timer(ms / 1000.0, lambda: pub.publish(Bool(data=not value))).start()
 
-    # ─────────────────────────────────────────
-    # 메뉴 스레드
     def _ensure_menu_thread(self):
         if self._menu_alive:
             return
@@ -97,7 +172,6 @@ class CoordinatorNode(Node):
         self._menu_thread.start()
 
     def _choose_function_blocking(self):
-        # 메뉴 시작: 커맨드 스레드가 stdin을 읽지 못하게 막음
         self._in_menu = True
         try:
             print("\n🌟 기능을 선택하세요:")
@@ -119,17 +193,14 @@ class CoordinatorNode(Node):
                     print("⚠️ 숫자를 입력하세요.")
             print("ℹ️ 실행 중 콘솔 입력: 1=적재, 2=회수, 3=일시정지, q=종료")
         finally:
-            # 메뉴 종료: 커맨드 스레드 읽기 허용
             self._in_menu = False
 
-    # ─────────────────────────────────────────
-    # 런타임 커맨드(입력 경쟁 방지)
     def _cmd_loop(self):
-        print("⌨️ 런타임 명령: 1=적재, 2=회수, 3=일시정지, q=종료 (기타 입력은 무시)")
+        print("⌨️ 런타임 명령: 1=적재, 2=회수, 3=일시정지, q=종료")
         while rclpy.ok():
             if self._in_menu:
                 time.sleep(0.1)
-                continue  # 메뉴가 열려 있으면 절대 stdin을 읽지 않음
+                continue
             try:
                 s = sys.stdin.readline()
                 if not s:
@@ -149,11 +220,7 @@ class CoordinatorNode(Node):
                 print("👋 종료 요청")
                 rclpy.shutdown()
                 break
-            else:
-                pass
 
-    # ─────────────────────────────────────────
-    # 기능 전환
     def select_function(self, option: int):
         if option == 1:
             new_steps = list(range(101, 118))
@@ -165,7 +232,6 @@ class CoordinatorNode(Node):
             self.get_logger().warn("⚠️ select_function: 잘못된 옵션")
             return
 
-        # 안전 정지/준비자세 (펄스)
         with self._pause_lock:
             self._paused = True
         self.pulse_bool(self.pub_a_pause)
@@ -176,7 +242,6 @@ class CoordinatorNode(Node):
         self.pub_a_pause.publish(Bool(data=False))
         self.pub_b_pause.publish(Bool(data=False))
 
-        # 내부 상태 초기화
         self.current_step = None
         self.step_list = new_steps
         self.idx = 0
@@ -187,18 +252,14 @@ class CoordinatorNode(Node):
         self.last_go_sent = 0.0
         self.go_sent_once = False
 
-        # 재개
         with self._pause_lock:
             self._paused = False
 
-        self.get_logger().info(f"🔁 기능 전환: {name} ({self.step_list[0]}~{self.step_list[-1]}) 시작")
+        self.get_logger().info(f"🔁 기능 전환: {name} 시작")
 
-        # 준비자세 안정화 후 시작
         time.sleep(1.0)
         self.start_step()
 
-    # ─────────────────────────────────────────
-    # STEP 전개
     def start_step(self):
         self.current_step = self.step_list[self.idx]
         self.a_ready = self.b_ready = -1
@@ -215,8 +276,6 @@ class CoordinatorNode(Node):
         self.last_step_sent = time.time()
         self.get_logger().info(f"📤 STEP {self.current_step} 전송 → A, B")
 
-    # ─────────────────────────────────────────
-    # 콜백
     def cb_a_ready(self, msg):
         step = int(msg.data)
         cur = self.current_step if self.current_step is not None else -1
@@ -239,8 +298,6 @@ class CoordinatorNode(Node):
         self.b_done = int(msg.data)
         self.get_logger().info(f"✅ B DONE: {self.b_done}")
 
-    # ─────────────────────────────────────────
-    # GO 발행 (READY 충족 시 1회)
     def _maybe_send_go(self):
         if self.current_step is None or not self.waiting_ready:
             return
@@ -249,52 +306,9 @@ class CoordinatorNode(Node):
                 self.pub_go.publish(Int32(data=int(self.current_step)))
                 self.last_go_sent = time.time()
                 self.go_sent_once = True
-                self.get_logger().info(f"🚦 GO {self.current_step} 발행(조건 충족, 1회)")
+                self.get_logger().info(f"🚦 GO {self.current_step} 발행")
             self.waiting_ready = False
 
-    # ─────────────────────────────────────────
-    # 일시정지
-    def trigger_pause(self):
-        with self._pause_lock:
-            if self._paused:
-                print("⏸ 이미 일시정지 상태입니다.")
-                return
-            self._paused = True
-
-        self.get_logger().warn("⏸ 일시정지 요청: 로봇 정지 및 준비자세 이동 지시")
-        self.pulse_bool(self.pub_a_pause)
-        self.pulse_bool(self.pub_b_pause)
-        self.pulse_bool(self.pub_a_move_ready)
-        self.pulse_bool(self.pub_b_move_ready)
-
-        while True:
-            ans = input("3=계속 / 4=초기화 ? ").strip()
-            if ans == '3':
-                with self._pause_lock:
-                    self._paused = False
-                self.get_logger().info("▶ 계속 진행합니다.")
-                break
-            elif ans == '4':
-                self.get_logger().info("🔄 초기화: 처음 메뉴로 돌아갑니다.")
-                with self._pause_lock:
-                    self._paused = False
-                self.current_step = None
-                self.step_list = []
-                self.idx = 0
-                self.a_ready = self.b_ready = -1
-                self.a_done = self.b_done = -1
-                self.waiting_ready = False
-                self.last_step_sent = 0.0
-                self.last_go_sent = 0.0
-                self.go_sent_once = False
-                # 메뉴 다시 띄우기
-                self._menu_start_evt.set()
-                break
-            else:
-                print("⚠️ '3' 또는 '4'만 입력하세요.")
-
-    # ─────────────────────────────────────────
-    # 메인 루프
     def tick(self):
         if self.current_step is None:
             return
@@ -313,17 +327,14 @@ class CoordinatorNode(Node):
             return
 
         if self.a_done == self.current_step and self.b_done == self.current_step:
-            self.get_logger().info(f"🎉 STEP {self.current_step} 모두 완료")
+            self.get_logger().info(f"🎉 STEP {self.current_step} 완료")
             self.idx += 1
             if self.idx >= len(self.step_list):
-                self.get_logger().info("🏁 모든 STEP 완료. 기능 선택으로 돌아갑니다.")
+                self.get_logger().info("🏁 모든 STEP 완료 → 기능 선택으로 복귀")
                 self.current_step = None
-                # 콜백 스레드에서 input()을 절대 호출하지 않음
-                self._menu_start_evt.set()   # 메뉴 스레드에게 알림
+                self._menu_start_evt.set()
             else:
                 self.start_step()
-            return
-        # GO 주기 재전송 없음
 
 
 def main(args=None):
