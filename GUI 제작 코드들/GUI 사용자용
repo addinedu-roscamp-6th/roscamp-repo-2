@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QGroupBox, QTextEdit, QLabel
+)
+from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+import sys
+from datetime import datetime
+
+# ===== ROS2 =====
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Bool
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+
+# ===== ROS Bridge =====
+class RosBridge(Node):
+    def __init__(self):
+        super().__init__('user_gui')
+        self.bridge = CvBridge()
+        self.latest_qimg = None
+
+        # ✅ 카메라 구독 (맵핑노드에서 퍼블리시하는 이미지)
+        self.sub_img = self.create_subscription(
+            Image, '/marker/debug_image', self.cb_image, 10
+        )
+
+        # ✅ 퍼블리셔 (호실별 로봇)
+        self.pub = {
+            101: {
+                "serving": self.create_publisher(Bool, '/pinky1/go_to_serving', 10),
+                "recall":  self.create_publisher(Bool, '/pinky1/go_to_recall', 10),
+                "return":  self.create_publisher(Bool, '/pinky1/go_to_return', 10),
+            },
+            102: {
+                "serving": self.create_publisher(Bool, '/pinky2/go_to_serving', 10),
+                "recall":  self.create_publisher(Bool, '/pinky2/go_to_recall', 10),
+                "return":  self.create_publisher(Bool, '/pinky2/go_to_return', 10),
+            },
+            103: {
+                "serving": self.create_publisher(Bool, '/pinky3/go_to_serving', 10),
+                "recall":  self.create_publisher(Bool, '/pinky3/go_to_recall', 10),
+                "return":  self.create_publisher(Bool, '/pinky3/go_to_return', 10),
+            },
+        }
+
+    def cb_image(self, msg: Image):
+        cv_img = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        h, w, ch = cv_img.shape
+        qimg = QImage(cv_img.data, w, h, w * ch, QImage.Format.Format_RGB888)
+        self.latest_qimg = qimg.copy()
+
+    # ===== 제어 명령 =====
+    def send_serving(self, room):
+        self.pub[room]["serving"].publish(Bool(data=True))
+        self.get_logger().info(f"[UserGUI] {room}호 Serving 요청 퍼블리시")
+
+    def send_recall_then_return(self, room):
+        self.pub[room]["recall"].publish(Bool(data=True))
+        self.get_logger().info(f"[UserGUI] {room}호 Recall 요청 퍼블리시")
+        # 10초 후 return
+        QTimer.singleShot(10000, lambda: self.pub[room]["return"].publish(Bool(data=True)))
+
+
+# ===== GUI =====
+class UserClientUI(QMainWindow):
+    def __init__(self, ros: RosBridge):
+        super().__init__()
+        self.ros = ros
+
+        self.setWindowTitle("양로원 식사 배달 로봇 사용자 인터페이스")
+        self.resize(1200, 800)
+
+        # 팔레트
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#e1d5e7"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#647687"))
+        self.setPalette(palette)
+
+        # 메인 레이아웃
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+
+        # 식사 요청/퇴식 패널
+        control_group = QGroupBox("식사 배달 요청 및 퇴식")
+        control_layout = QVBoxLayout(control_group)
+        for room in [101, 102, 103]:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+
+            btn_req = QPushButton(f"{room}호 식사 요청")
+            btn_req.setFixedHeight(80)
+            btn_req.clicked.connect(lambda _, r=room: self.request_meal(r))
+
+            btn_clear = QPushButton(f"{room}호 퇴식")
+            btn_clear.setFixedHeight(80)
+            btn_clear.clicked.connect(lambda _, r=room: self.clear_meal(r))
+
+            row_layout.addWidget(btn_req)
+            row_layout.addWidget(btn_clear)
+            control_layout.addWidget(row)
+
+        main_layout.addWidget(control_group)
+
+        # 카메라 패널
+        camera_group = QGroupBox("실시간 카메라 화면 (/marker/debug_image)")
+        cam_layout = QVBoxLayout(camera_group)
+        self.camera_label = QLabel("카메라 대기중…")
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setStyleSheet("background-color:black; border-radius:6px;")
+        cam_layout.addWidget(self.camera_label)
+        main_layout.addWidget(camera_group)
+
+        # 알림 & 로그 패널
+        bottom = QWidget()
+        bottom_layout = QHBoxLayout(bottom)
+
+        alert_group = QGroupBox("알림")
+        alert_layout = QVBoxLayout(alert_group)
+        self.alert_text = QTextEdit(); self.alert_text.setReadOnly(True)
+        alert_layout.addWidget(self.alert_text)
+
+        log_group = QGroupBox("요청 기록")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit(); self.log_text.setReadOnly(True)
+        log_layout.addWidget(self.log_text)
+
+        bottom_layout.addWidget(alert_group)
+        bottom_layout.addWidget(log_group)
+        main_layout.addWidget(bottom)
+
+        # 타이머 루프 (ROS spin + 카메라 갱신)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._on_timer)
+        self.timer.start(50)
+
+    # ===== 버튼 동작 =====
+    def request_meal(self, room):
+        self.ros.send_serving(room)
+        self.log_action(f"{room}호 식사 요청 → serving")
+        self.alert_action(f"{room}호 식사 배달 시작")
+
+    def clear_meal(self, room):
+        self.ros.send_recall_then_return(room)
+        self.log_action(f"{room}호 퇴식 요청 → recall 후 10초 뒤 return")
+        self.alert_action(f"{room}호 퇴식 시작")
+
+    # ===== 로그/알림 =====
+    def log_action(self, msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log_text.append(f"[{ts}] {msg}")
+
+    def alert_action(self, msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.alert_text.append(f"[{ts}] {msg}")
+
+    # ===== 루프 =====
+    def _on_timer(self):
+        rclpy.spin_once(self.ros, timeout_sec=0.0)
+        if self.ros.latest_qimg is not None:
+            pix = QPixmap.fromImage(self.ros.latest_qimg).scaled(
+                self.camera_label.width(), self.camera_label.height(),
+                Qt.AspectRatioMode.KeepAspectRatio
+            )
+            self.camera_label.setPixmap(pix)
+
+
+# ===== main =====
+def main():
+    rclpy.init()
+    ros = RosBridge()
+    app = QApplication(sys.argv)
+    w = UserClientUI(ros)
+    w.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()

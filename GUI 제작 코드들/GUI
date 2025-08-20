@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
+    QPushButton, QGroupBox, QTextEdit, QLabel
+)
+from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+
+import sys
+from datetime import datetime
+import math
+
+# ===== ROS2 =====
+import rclpy
+from rclpy.node import Node
+from rclpy.qos import QoSPresetProfiles
+from std_msgs.msg import String, Bool
+from geometry_msgs.msg import PoseStamped
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+# ===== 비디오/포즈 토픽 설정 =====
+IMAGE_TOPICS = {
+    "Global":   "/marker/debug_image",
+    "Pinky-1":  "/pinky1/camera/image_raw",
+    "Pinky-2":  "/pinky2/camera/image_raw",
+    "Pinky-3":  "/pinky3/camera/image_raw",
+}
+POSE_TOPICS = {
+    "Pinky-1": "/marker_map/ID25",
+    "Pinky-2": "/marker_map/ID26",
+    "Pinky-3": "/marker_map/ID27",
+}
+CELL_W, CELL_H = 640, 360
+
+
+class RosBridge(Node):
+    """ROS2 퍼블리셔/구독자 + 최신 상태 보관 (멀티 카메라 & 3대 포즈 + Bool 명령 전용)"""
+    def __init__(self, image_topics: dict[str, str], pose_topics: dict[str, str]):
+        super().__init__('delivery_robot_gui')
+
+        # --- 상태 버퍼 ---
+        self.bridge = CvBridge()
+        self.latest_qimages: dict[str, QImage | None] = {name: None for name in image_topics.keys()}
+        self.latest_poses: dict[str, tuple[float, float, float] | None] = {name: None for name in pose_topics.keys()}
+
+        # --- (1) 멀티 카메라 구독자 ---
+        self.image_subs = {}
+        for name, topic in image_topics.items():
+            self.image_subs[name] = self.create_subscription(
+                Image, topic, self._make_img_cb(name),
+                QoSPresetProfiles.SENSOR_DATA.value
+            )
+
+        # --- (2) 다중 포즈 구독자 ---
+        self.pose_subs = {}
+        for name, topic in pose_topics.items():
+            self.pose_subs[name] = self.create_subscription(
+                PoseStamped, topic, self._make_pose_cb(name), 10
+            )
+
+        # --- (3) 공통 알림/로그 구독 ---
+        self.sub_alert = self.create_subscription(String, '/alerts', self._cb_alert, 10)
+        self.pub_log   = self.create_publisher(String, '/gui/log', 10)
+
+        # --- (4) ✅ Pinky1/2/3 전용 Bool 명령 (브릿지에서 /go_to_* & /stop 으로 리매핑)
+        # Pinky1
+        self.pub_p1_kitchen = self.create_publisher(Bool, '/pinky1/go_to_kitchen', 10)
+        self.pub_p1_serving = self.create_publisher(Bool, '/pinky1/go_to_serving', 10)
+        self.pub_p1_charge  = self.create_publisher(Bool, '/pinky1/go_to_charge', 10)
+        self.pub_p1_room    = self.create_publisher(Bool, '/pinky1/go_to_room', 10)
+        self.pub_p1_recall  = self.create_publisher(Bool, '/pinky1/go_to_recall', 10)
+        self.pub_p1_return  = self.create_publisher(Bool, '/pinky1/go_to_return', 10)
+        self.pub_p1_stop    = self.create_publisher(Bool, '/pinky1/stop', 10)
+
+        # Pinky2
+        self.pub_p2_kitchen = self.create_publisher(Bool, '/pinky2/go_to_kitchen', 10)
+        self.pub_p2_serving = self.create_publisher(Bool, '/pinky2/go_to_serving', 10)
+        self.pub_p2_charge  = self.create_publisher(Bool, '/pinky2/go_to_charge', 10)
+        self.pub_p2_room    = self.create_publisher(Bool, '/pinky2/go_to_room', 10)
+        self.pub_p2_recall  = self.create_publisher(Bool, '/pinky2/go_to_recall', 10)
+        self.pub_p2_return  = self.create_publisher(Bool, '/pinky2/go_to_return', 10)
+        self.pub_p2_stop    = self.create_publisher(Bool, '/pinky2/stop', 10)
+
+        # Pinky3
+        self.pub_p3_kitchen = self.create_publisher(Bool, '/pinky3/go_to_kitchen', 10)
+        self.pub_p3_serving = self.create_publisher(Bool, '/pinky3/go_to_serving', 10)
+        self.pub_p3_charge  = self.create_publisher(Bool, '/pinky3/go_to_charge', 10)
+        self.pub_p3_room    = self.create_publisher(Bool, '/pinky3/go_to_room', 10)
+        self.pub_p3_recall  = self.create_publisher(Bool, '/pinky3/go_to_recall', 10)
+        self.pub_p3_return  = self.create_publisher(Bool, '/pinky3/go_to_return', 10)
+        self.pub_p3_stop    = self.create_publisher(Bool, '/pinky3/stop', 10)
+
+        # GUI 콜백 훅
+        self.gui_append_log = None
+        self.gui_append_alert = None
+        self.gui_set_pose_text = None
+
+    # ===== 콜백들 =====
+    def _make_img_cb(self, name: str):
+        def _cb(msg: Image):
+            try:
+                cv_bgr = self.bridge.imgmsg_to_cv2(msg, desired_encoding='bgr8')
+                cv_rgb = cv_bgr[:, :, ::-1]
+                h, w = cv_rgb.shape[:2]
+                bytes_per_line = w * 3
+                qimg = QImage(cv_rgb.tobytes(), w, h, bytes_per_line, QImage.Format.Format_RGB888).copy()
+                self.latest_qimages[name] = qimg
+            except Exception as e:
+                self._log_gui(f"[{name}] cv_bridge 변환 실패: {e}")
+        return _cb
+
+    def _make_pose_cb(self, name: str):
+        def _cb(msg: PoseStamped):
+            x = msg.pose.position.x
+            y = msg.pose.position.y
+            z = msg.pose.orientation.z
+            w = msg.pose.orientation.w
+            yaw = 2.0 * math.atan2(z, w)
+            yaw_deg = math.degrees(yaw)
+            self.latest_poses[name] = (x, y, yaw_deg)
+            if self.gui_set_pose_text:
+                text = " | ".join(
+                    f"{n}: x={p[0]:.2f}, y={p[1]:.2f}, yaw={p[2]:.1f}°"
+                    for n, p in self.latest_poses.items() if p is not None
+                )
+                self.gui_set_pose_text(text if text else "현재 위치: -")
+        return _cb
+
+    def _cb_alert(self, msg: String):
+        self._alert_gui(msg.data)
+
+    # ===== GUI 훅 =====
+    def set_callbacks(self, append_log, append_alert, set_pose_text):
+        self.gui_append_log = append_log
+        self.gui_append_alert = append_alert
+        self.gui_set_pose_text = set_pose_text
+
+    # ===== 유틸 =====
+    def _log_gui(self, text: str):
+        if self.gui_append_log:
+            self.gui_append_log(text)
+        self.pub_log.publish(String(data=text))
+
+    def _alert_gui(self, text: str):
+        if self.gui_append_alert:
+            self.gui_append_alert(text)
+
+    # ===== ✅ Pinky1/2/3 전용 Bool 명령 =====
+    def _send_goal(self, robot: int, goal_name: str):
+        table = {
+            1: {
+                "kitchen": self.pub_p1_kitchen, "serving": self.pub_p1_serving,
+                "charge": self.pub_p1_charge,   "room":    self.pub_p1_room,
+                "recall": self.pub_p1_recall,   "return":  self.pub_p1_return,
+            },
+            2: {
+                "kitchen": self.pub_p2_kitchen, "serving": self.pub_p2_serving,
+                "charge": self.pub_p2_charge,   "room":    self.pub_p2_room,
+                "recall": self.pub_p2_recall,   "return":  self.pub_p2_return,
+            },
+            3: {
+                "kitchen": self.pub_p3_kitchen, "serving": self.pub_p3_serving,
+                "charge": self.pub_p3_charge,   "room":    self.pub_p3_room,
+                "recall": self.pub_p3_recall,   "return":  self.pub_p3_return,
+            },
+        }
+        pub = table.get(robot, {}).get(goal_name)
+        if pub is None:
+            self._log_gui(f"[Pinky{robot}] 알 수 없는 목표: {goal_name}")
+            return
+        pub.publish(Bool(data=True))
+        self._log_gui(f"[Pinky{robot}] /pinky{robot}/go_to_{goal_name} = True  (브릿지→/go_to_{goal_name})")
+
+    def _send_stop(self, robot: int):
+        pub = {1: self.pub_p1_stop, 2: self.pub_p2_stop, 3: self.pub_p3_stop}.get(robot)
+        if pub is None:
+            self._log_gui(f"[Pinky{robot}] STOP 퍼블리셔 없음")
+            return
+        pub.publish(Bool(data=True))
+        self._log_gui(f"[Pinky{robot}] /pinky{robot}/stop = True  (브릿지→/stop)")
+
+    def send_p1_goal(self, goal_name: str): self._send_goal(1, goal_name)
+    def send_p2_goal(self, goal_name: str): self._send_goal(2, goal_name)
+    def send_p3_goal(self, goal_name: str): self._send_goal(3, goal_name)
+    def send_p1_stop(self): self._send_stop(1)
+    def send_p2_stop(self): self._send_stop(2)
+    def send_p3_stop(self): self._send_stop(3)
+
+
+class GUI(QMainWindow):
+    def __init__(self, ros: RosBridge, image_topics: dict[str, str]):
+        super().__init__()
+        self.ros = ros
+        self.image_names = list(image_topics.keys())
+
+        self.setWindowTitle("양로원 식사 배달 로봇 제어 (ROS2 토픽 전용)")
+        self.showMaximized()
+
+        # 팔레트
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#FFF2CC"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#E1D5E7"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#FFF2CC"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#647687"))
+        self.setPalette(palette)
+
+        # 메인 레이아웃
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+
+        # 좌측: 2x2 영상 + 다중 포즈 상태
+        left_widget = QWidget()
+        left_widget.setStyleSheet("background-color: #BAC8D3; border-radius: 10px; padding: 15px; border: 2px solid #647687;")
+        left_layout = QGridLayout(left_widget)
+        left_layout.setSpacing(8)
+
+        # 2x2 비디오 패널
+        self.video_labels: dict[str, QLabel] = {}
+        positions = [(0,0), (0,1), (1,0), (1,1)]
+        for (row, col), name in zip(positions, self.image_names):
+            box = QGroupBox(f"{name} ({image_topics[name]})")
+            box.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 16px;")
+            box_layout = QVBoxLayout(box)
+            lbl = QLabel(f"{name} 대기중…")
+            lbl.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px; color: #647687;")
+            lbl.setFixedSize(CELL_W, CELL_H)
+            lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            box_layout.addWidget(lbl)
+            left_layout.addWidget(box, row, col)
+            self.video_labels[name] = lbl
+
+        # 다중 포즈
+        self.pose_label = QLabel("현재 위치: -")
+        self.pose_label.setStyleSheet("color: #374151; font-size: 16px;")
+        left_layout.addWidget(self.pose_label, 2, 0, 1, 2)
+
+        main_layout.addWidget(left_widget, stretch=1)
+
+        # 우측: 알림/제어/로그
+        right_widget = QWidget()
+        right_widget.setStyleSheet("background-color: #BAC8D3; border-radius: 10px; padding: 15px; border: 2px solid #647687;")
+        right_layout = QVBoxLayout(right_widget)
+        right_layout.setSpacing(15)
+
+        # 알림
+        alert_group = QGroupBox("알림 (/alerts)")
+        alert_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px;")
+        alert_layout = QVBoxLayout(alert_group)
+        self.alert_text = QTextEdit()
+        self.alert_text.setReadOnly(True)
+        self.alert_text.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px;")
+        alert_layout.addWidget(self.alert_text)
+
+        # 제어 (오직 Bool 기반 브릿지용 버튼)
+        ctrl_group = QGroupBox("로봇 제어 (브릿지 Bool 토픽)")
+        ctrl_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px;")
+        ctrl_layout = QGridLayout(ctrl_group)
+
+        bool_cmds = [
+            ("주방",   "kitchen"),
+            ("배식대", "serving"),
+            ("충전소", "charge"),
+            ("방",     "room"),
+            ("리콜",   "recall"),
+            ("복귀",   "return"),
+        ]
+        # Pinky1 (3열)
+        base_row = 0
+        for i, (label, goal) in enumerate(bool_cmds):
+            btn = QPushButton(f"Pinky1: {label}")
+            btn.setStyleSheet("background-color: #E1D5E7; border-radius: 6px; padding: 10px; font-size: 16px; border: 1px solid #647687;")
+            btn.clicked.connect(lambda _, g=goal: self.ros.send_p1_goal(g))
+            ctrl_layout.addWidget(btn, base_row + i, 2)
+        btn_p1_stop = QPushButton("Pinky1: STOP")
+        btn_p1_stop.setStyleSheet("background-color: #ffdddd; border-radius: 6px; padding: 10px; font-size: 16px; border: 2px solid #aa0000;")
+        btn_p1_stop.clicked.connect(lambda _: self.ros.send_p1_stop())
+        ctrl_layout.addWidget(btn_p1_stop, base_row + len(bool_cmds), 2)
+
+        # Pinky2 (4열)
+        for i, (label, goal) in enumerate(bool_cmds):
+            btn = QPushButton(f"Pinky2: {label}")
+            btn.setStyleSheet("background-color: #E1D5E7; border-radius: 6px; padding: 10px; font-size: 16px; border: 1px solid #647687;")
+            btn.clicked.connect(lambda _, g=goal: self.ros.send_p2_goal(g))
+            ctrl_layout.addWidget(btn, base_row + i, 3)
+        btn_p2_stop = QPushButton("Pinky2: STOP")
+        btn_p2_stop.setStyleSheet("background-color: #ffdddd; border-radius: 6px; padding: 10px; font-size: 16px; border: 2px solid #aa0000;")
+        btn_p2_stop.clicked.connect(lambda _: self.ros.send_p2_stop())
+        ctrl_layout.addWidget(btn_p2_stop, base_row + len(bool_cmds), 3)
+
+        # Pinky3 (5열)
+        for i, (label, goal) in enumerate(bool_cmds):
+            btn = QPushButton(f"Pinky3: {label}")
+            btn.setStyleSheet("background-color: #E1D5E7; border-radius: 6px; padding: 10px; font-size: 16px; border: 1px solid #647687;")
+            btn.clicked.connect(lambda _, g=goal: self.ros.send_p3_goal(g))
+            ctrl_layout.addWidget(btn, base_row + i, 4)
+        btn_p3_stop = QPushButton("Pinky3: STOP")
+        btn_p3_stop.setStyleSheet("background-color: #ffdddd; border-radius: 6px; padding: 10px; font-size: 16px; border: 2px solid #aa0000;")
+        btn_p3_stop.clicked.connect(lambda _: self.ros.send_p3_stop())
+        ctrl_layout.addWidget(btn_p3_stop, base_row + len(bool_cmds), 4)
+
+        # JetCobot (버튼 삭제 요청에 따라 제외) — 필요해지면 추가 가능
+
+        # 로그
+        log_group = QGroupBox("작업 로그 (/gui/log)")
+        log_group.setStyleSheet("color: #647687; border: 2px solid #647687; border-radius: 10px; font-size: 18px;")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("background-color: #FFF2CC; border: 2px solid #647687; border-radius: 6px;")
+        log_layout.addWidget(self.log_text)
+
+        # 우측 합치기
+        right_layout.addWidget(alert_group)
+        right_layout.addWidget(ctrl_group)
+        right_layout.addWidget(log_group)
+        right_layout.addStretch()
+        main_layout.addWidget(right_widget, stretch=1)
+
+        # ROS → GUI 콜백 연결
+        self.ros.set_callbacks(
+            append_log=self.log_action,
+            append_alert=self.alert_action,
+            set_pose_text=self.pose_label.setText
+        )
+
+        # 타이머: ROS spin + 화면 갱신
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._on_timer)
+        self.timer.start(33)  # ~30fps
+
+        self.log_action("GUI 시작. 다중 카메라/포즈 구독; /pinkyN/go_to_*, /pinkyN/stop 퍼블리시")
+
+    # 타이머 루프
+    def _on_timer(self):
+        rclpy.spin_once(self.ros, timeout_sec=0.0)
+        for name, qimg in self.ros.latest_qimages.items():
+            lbl = self.video_labels.get(name)
+            if lbl is None or qimg is None:
+                continue
+            pix = QPixmap.fromImage(qimg.scaled(CELL_W, CELL_H, Qt.AspectRatioMode.KeepAspectRatio))
+            lbl.setPixmap(pix)
+
+    # 로그/알림
+    def log_action(self, message: str):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log_text.append(f"[{ts}] {message}")
+
+    def alert_action(self, message: str):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.alert_text.append(f"[{ts}] {message}")
+
+    # 종료 처리
+    def closeEvent(self, event):
+        try:
+            self.ros.destroy_node()
+            rclpy.shutdown()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+
+def main():
+    rclpy.init(args=None)
+    ros = RosBridge(IMAGE_TOPICS, POSE_TOPICS)
+    app = QApplication(sys.argv)
+    w = GUI(ros, IMAGE_TOPICS)
+    w.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()
+
