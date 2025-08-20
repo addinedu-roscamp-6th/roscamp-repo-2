@@ -1,0 +1,18 @@
+<launch>
+  <!-- 1) 기존 브링업 -->
+  <include file="$(find-pkg-share pinky_bringup)/launch/bringup.launch.xml"/>
+
+  <!-- 2) 컨트롤러 노드 -->
+  <node pkg="pinky_controller" exec="controller_node" output="screen"/>
+
+  <!-- 3) Flask GUICAM.py를 별도 프로세스로 실행 -->
+  <execute_process
+      cmd="python3 /home/pinky/GUICAM.py"
+      output="screen">
+    <!-- 환경변수로 포트/해상도 조정 -->
+    <env name="PORT" value="9819"/>
+    <env name="WIDTH" value="320"/>
+    <env name="HEIGHT" value="240"/>
+    <env name="JPEG_QUALITY" value="80"/>
+  </execute_process>
+</launch>
