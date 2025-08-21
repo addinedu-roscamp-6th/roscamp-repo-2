@@ -1,0 +1,165 @@
+topics:
+  /pinky1/marker_map/ID25:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 55
+    remap: /marker_map/ID25
+  /pinky1/go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_kitchen
+  /pinky1/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_serving
+  /pinky1/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_charge
+  /pinky1/go_to_room:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_room
+  /pinky1/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_recall
+  /pinky1/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /go_to_return
+  /pinky1/stop:                 
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 55
+    remap: /stop
+  #/pinky1/camera/image_raw:
+  #  type: sensor_msgs/msg/Image
+  #  from_domain: 55
+  #  to_domain: 10
+  #  remap: /pinky1/camera/image_raw
+  #/pinky1/camera/camera_info:
+  #  type: sensor_msgs/msg/CameraInfo
+  #  from_domain: 55
+  #  to_domain: 10
+  #  remap: /pinky1/camera/camera_info
+  # (옵션) 로봇→PC 모니터링
+  # cmd_vel:
+  #    type: geometry_msgs/msg/Twist
+  #    from_domain: 55
+  #    to_domain: 10
+  #    remap: pinky1/cmd_vel
+  /pinky2/marker_map/ID26:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 8
+    remap: /marker_map/ID26
+  /pinky2/go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_kitchen
+  /pinky2/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_serving
+  /pinky2/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_charge
+  /pinky2/go_to_room:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_room
+  /pinky2/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_recall
+  /pinky2/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /go_to_return
+  /pinky2/stop:                 
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 8
+    remap: /stop
+  #/pinky2/camera/image_raw:
+  #  type: sensor_msgs/msg/Image
+  #  from_domain: 8
+  #  to_domain: 10
+  #  remap: /pinky2/camera/image_raw
+  #/pinky2/camera/camera_info:
+  #  type: sensor_msgs/msg/CameraInfo
+  #  from_domain: 8
+  #  to_domain: 10
+  #  remap: /pinky2/camera/camera_info
+  #/pinky2/cmd_vel:
+  # type: geometry_msgs/msg/Twist
+  # from_domain: 8
+  # to_domain: 10
+  /pinky3/marker_map/ID27:
+    type: geometry_msgs/msg/PoseStamped
+    from_domain: 10
+    to_domain: 9
+    remap: /marker_map/ID27
+  /pinky3/go_to_kitchen:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_kitchen
+  /pinky3/go_to_serving:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_serving
+  /pinky3/go_to_charge:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_charge
+  /pinky3/go_to_room:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_room
+  /pinky3/go_to_recall:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_recall
+  /pinky3/go_to_return:
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /go_to_return
+  /pinky3/stop:                 
+    type: std_msgs/msg/Bool
+    from_domain: 10
+    to_domain: 9
+    remap: /stop
+  #/pinky3/camera/image_raw:
+  #  type: sensor_msgs/msg/Image
+  #  from_domain: 9
+  #  to_domain: 10
+  #  remap: /pinky3/camera/image_raw
+  #/pinky3/camera/camera_info:
+  #  type: sensor_msgs/msg/CameraInfo
+  #  from_domain: 9
+  #  to_domain: 10
+  #  remap: /pinky3/camera/camera_info
+  #/pinky3/cmd_vel:
+  #  type: geometry_msgs/msg/Twist
+  # from_domain: 9
+  #to_domain: 10
