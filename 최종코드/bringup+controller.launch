@@ -1,0 +1,6 @@
+<launch>
+  <!-- 1) 기존 브링업 런치 포함 -->
+  <include file="$(find-pkg-share pinky_bringup)/launch/bringup.launch.xml"/>
+  <!-- 2) 컨트롤러 노드 실행 -->
+  <node pkg="pinky_controller" exec="controller_node"/>
+</launch>
