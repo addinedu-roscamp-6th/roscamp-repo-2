@@ -1,0 +1,184 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+import socket  # ★ 추가: UDP
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QPushButton, QGroupBox, QTextEdit, QLabel, QSizePolicy
+)
+from PyQt6.QtGui import QPalette, QColor, QImage, QPixmap
+from PyQt6.QtCore import Qt, QTimer
+import sys
+from datetime import datetime
+import cv2  # 색상 변환용
+
+# ===== 중앙제어 UDP 설정 =====
+CENTRAL_IP = "192.168.247.20"   # ★ 중앙제어 GUI PC의 IP로 변경하세요
+CENTRAL_PORT = 9999
+
+# ===== ROS2 =====
+import rclpy
+from rclpy.node import Node
+from sensor_msgs.msg import Image
+from cv_bridge import CvBridge
+
+
+# ===== ROS Bridge (카메라 구독만 유지) =====
+class RosBridge(Node):
+    def __init__(self):
+        super().__init__('user_gui')
+        self.bridge = CvBridge()
+        self.latest_qimg = None
+
+        # 카메라 구독만 유지
+        self.sub_img = self.create_subscription(
+            Image, '/marker/debug_image', self.cb_image, 10
+        )
+
+    # --- 카메라 콜백: BGR -> RGB (색상 정상화)
+    def cb_image(self, msg: Image):
+        bgr = self.bridge.imgmsg_to_cv2(msg, "bgr8")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        h, w, ch = rgb.shape
+        qimg = QImage(rgb.data, w, h, w * ch, QImage.Format.Format_RGB888)
+        self.latest_qimg = qimg.copy()
+
+
+# ===== GUI =====
+class UserClientUI(QMainWindow):
+    def __init__(self, ros: RosBridge):
+        super().__init__()
+        self.ros = ros
+
+        # ★ UDP 소켓 준비
+        self._udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self._udp_target = (CENTRAL_IP, CENTRAL_PORT)
+
+        self.setWindowTitle("양로원 식사 배달 로봇 사용자 인터페이스")
+        self.resize(1400, 900)
+
+        # 팔레트
+        palette = QPalette()
+        palette.setColor(QPalette.ColorRole.Window, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.WindowText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Button, QColor("#e1d5e7"))
+        palette.setColor(QPalette.ColorRole.ButtonText, QColor("#647687"))
+        palette.setColor(QPalette.ColorRole.Base, QColor("#fff2cc"))
+        palette.setColor(QPalette.ColorRole.Text, QColor("#647687"))
+        self.setPalette(palette)
+
+        # 메인 레이아웃
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(15, 15, 15, 15)
+        main_layout.setSpacing(15)
+
+        # 식사 요청/퇴식 패널 (이제 UDP 전송만)
+        control_group = QGroupBox("식사 배달 요청 및 퇴식 (UDP 전송)")
+        control_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        control_layout = QVBoxLayout(control_group)
+        for room in [101, 102, 103]:
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+
+            btn_req = QPushButton(f"{room}호 식사 요청")
+            btn_req.setFixedHeight(80)
+            btn_req.clicked.connect(lambda _, r=room: self.request_meal(r))
+
+            btn_clear = QPushButton(f"{room}호 퇴식")
+            btn_clear.setFixedHeight(80)
+            btn_clear.clicked.connect(lambda _, r=room: self.clear_meal(r))
+
+            row_layout.addWidget(btn_req)
+            row_layout.addWidget(btn_clear)
+            control_layout.addWidget(row)
+
+        # 카메라 패널
+        camera_group = QGroupBox("실시간 카메라 화면 (/marker/debug_image)")
+        camera_group.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        cam_layout = QVBoxLayout(camera_group)
+        self.camera_label = QLabel("카메라 대기중…")
+        self.camera_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.camera_label.setStyleSheet("background-color:black; border-radius:6px;")
+        self.camera_label.setMinimumHeight(500)
+        self.camera_label.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        cam_layout.addWidget(self.camera_label)
+
+        # 알림 & 로그 패널
+        bottom = QWidget()
+        bottom.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        bottom_layout = QHBoxLayout(bottom)
+
+        alert_group = QGroupBox("알림")
+        alert_layout = QVBoxLayout(alert_group)
+        self.alert_text = QTextEdit(); self.alert_text.setReadOnly(True)
+        alert_layout.addWidget(self.alert_text)
+
+        log_group = QGroupBox("요청 기록")
+        log_layout = QVBoxLayout(log_group)
+        self.log_text = QTextEdit(); self.log_text.setReadOnly(True)
+        log_layout.addWidget(self.log_text)
+
+        bottom_layout.addWidget(alert_group)
+        bottom_layout.addWidget(log_group)
+
+        # 배치
+        main_layout.addWidget(control_group, 0)
+        main_layout.addWidget(camera_group, 1)
+        main_layout.addWidget(bottom, 0)
+
+        # 타이머 루프 (ROS spin + 카메라 갱신)
+        self.timer = QTimer()
+        self.timer.timeout.connect(self._on_timer)
+        self.timer.start(50)
+
+    # ===== UDP 전송 헬퍼 =====
+    def notify_central(self, text: str):
+        try:
+            self._udp.sendto(text.encode("utf-8"), self._udp_target)
+        except Exception as e:
+            self.log_action(f"중앙 알림 전송 실패: {e}")
+
+    # ===== 버튼 동작 (UDP만 전송) =====
+    def request_meal(self, room: int):
+        self.notify_central(f"{room}호 식사 요청")
+        self.log_action(f"{room}호 식사 요청 (UDP 전송)")
+        self.alert_action(f"{room}호 식사 배달 시작")
+
+    def clear_meal(self, room: int):
+        self.notify_central(f"{room}호 퇴식 요청")
+        self.log_action(f"{room}호 퇴식 요청 (UDP 전송)")
+        self.alert_action(f"{room}호 퇴식 진행")
+
+    # ===== 로그/알림 =====
+    def log_action(self, msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.log_text.append(f"[{ts}] {msg}")
+
+    def alert_action(self, msg):
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        self.alert_text.append(f"[{ts}] {msg}")
+
+    # ===== 루프 =====
+    def _on_timer(self):
+        rclpy.spin_once(self.ros, timeout_sec=0.0)
+        if self.ros.latest_qimg is not None:
+            pix = QPixmap.fromImage(self.ros.latest_qimg).scaled(
+                self.camera_label.width(), self.camera_label.height(),
+                Qt.AspectRatioMode.KeepAspectRatio
+            )
+            self.camera_label.setPixmap(pix)
+
+
+# ===== main =====
+def main():
+    rclpy.init()
+    ros = RosBridge()
+    app = QApplication(sys.argv)
+    w = UserClientUI(ros)
+    w.show()
+    sys.exit(app.exec())
+
+if __name__ == "__main__":
+    main()
