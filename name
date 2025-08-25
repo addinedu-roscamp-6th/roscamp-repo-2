@@ -160,7 +160,7 @@ class RosBridge(Node):
         self.pub_p1_stop    = self.create_publisher(Bool, '/pinky1/stop', 10)
 
         self.pub_p2_kitchen = self.create_publisher(Bool, '/pinky2/go_to_kitchen', 10)
-               self.pub_p2_serving = self.create_publisher(Bool, '/pinky2/go_to_serving', 10)
+        self.pub_p2_serving = self.create_publisher(Bool, '/pinky2/go_to_serving', 10)
         self.pub_p2_charge  = self.create_publisher(Bool, '/pinky2/go_to_charge', 10)
         self.pub_p2_room    = self.create_publisher(Bool, '/pinky2/go_to_room', 10)
         self.pub_p2_recall  = self.create_publisher(Bool, '/pinky2/go_to_recall', 10)
