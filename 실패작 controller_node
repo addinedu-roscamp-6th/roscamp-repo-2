@@ -1,0 +1,103 @@
+박희지
+ Direct Message
+7월 21일, 오후 5:45
+import rclpy
+import math
+from rclpy.node import Node
+from geometry_msgs.msg import PoseStamped, PointStamped, Twist
+# 제어 파라미터
+K_LINEAR      = 0.1     # 선형 속도 이득
+K_ANGULAR     = 0.8     # 각속도 이득
+ANGLE_TH      = 0.3    # 회전→직진 전환 임계각 (rad)
+DIST_TH       = 0.1     # 목표 도달 거리 (m)
+MAX_LIN_SPEED = 0.1     # 최대 선형 속도 (m/s)
+MAX_ANG_SPEED = 0.5     # 최대 각속도 (rad/s)
+def normalize_angle(a: float) -> float:
+    while a > math.pi:
+        a -= 2 * math.pi
+    while a <= -math.pi:
+        a += 2 * math.pi
+    return a
+class ControllerNode(Node):
+    def __init__(self):
+        super().__init__('controller_node')
+        self.robot_x = self.robot_y = self.robot_yaw = None
+        self.goal_x  = self.goal_y  = None
+        self.state   = 'IDLE'
+        # 구독·퍼블리셔
+        self.create_subscription(PoseStamped, '/marker_map/ID25', self.cb_robot, 10)
+        self.create_subscription(PointStamped, '/manual_goal',  self.cb_goal,  10)
+        self.cmd_pub = self.create_publisher(Twist, '/cmd_vel', 10)
+        # 0.5초 주기로 control_loop 실행
+        self.create_timer(0.01, self.control_loop)
+        self.get_logger().info('ControllerNode started.')
+    def cb_robot(self, msg: PoseStamped):
+        # 로봇 위치·방향 업데이트
+        self.robot_x = msg.pose.position.x
+        self.robot_y = msg.pose.position.y
+        qz, qw = msg.pose.orientation.z, msg.pose.orientation.w
+        self.robot_yaw = 2.0 * math.atan2(qz, qw)
+        # 디버그 로그
+        self.get_logger().debug(f'Robot pose: x={self.robot_x:.3f}, y={self.robot_y:.3f}, yaw={self.robot_yaw:.3f}')
+    def cb_goal(self, msg: PointStamped):
+        # 목표 수신 → 회전 상태로 전환
+        self.goal_x = msg.point.x
+        self.goal_y = msg.point.y
+        self.state = 'ROTATING'
+        self.get_logger().info(f'Goal set: ({self.goal_x:.3f}, {self.goal_y:.3f})')
+        self.get_logger().debug(f'State changed to: {self.state}')
+    def control_loop(self):
+        if None in (self.robot_x, self.robot_y, self.robot_yaw, self.goal_x, self.goal_y):
+            return
+        dx = self.goal_x - self.robot_x
+        dy = self.goal_y - self.robot_y
+        dist = math.hypot(dx, dy)
+        target_ang = math.atan2(dy, dx)
+        err = normalize_angle(target_ang - self.robot_yaw)
+        self.get_logger().info(f'err={err:.2f} rad, dist={dist:.2f} m')
+        # 디버그 로그: 제어 변수
+        self.get_logger().debug(f'dx={dx:.3f}, dy={dy:.3f}, dist={dist:.3f}, err={err:.3f}')
+        cmd = Twist()
+        if self.state == 'IDLE':
+            return
+        # 도착 처리
+        if dist < DIST_TH:
+            cmd.linear.x  = 0.0
+            cmd.angular.z = 0.0
+            self.cmd_pub.publish(cmd)
+            self.get_logger().info('Arrived at goal. Switching to IDLE.')
+            self.state = 'IDLE'
+            self.goal_x = self.goal_y = None
+            return
+        # ROTATING 상태
+        if self.state == 'ROTATING':
+            if abs(err) < ANGLE_TH:
+                self.state = 'MOVING'
+                self.get_logger().info('Rotation aligned. Switching to MOVING.')
+            else:
+                v = K_ANGULAR * err
+                # cmd.angular.z = max(-MAX_ANG_SPEED, min(MAX_ANG_SPEED, v))  ### ham
+                cmd.angular.z = 0.01 ### ham
+                cmd.linear.x  = 0.0
+                self.get_logger().debug(f'Rotating: angular.z={cmd.angular.z:.3f}')
+        # MOVING 상태
+        elif self.state == 'MOVING':
+            if abs(err) > ANGLE_TH:
+                self.state = 'ROTATING'
+                self.get_logger().info('Deviation detected. Switching to ROTATING.')
+            else:
+                v = K_LINEAR * dist
+                cmd.linear.x  = max(-MAX_LIN_SPEED, min(MAX_LIN_SPEED, v))
+                cmd.angular.z = 0.0
+                self.get_logger().debug(f'Moving: linear.x={cmd.linear.x:.3f}')
+        self.cmd_pub.publish(cmd)
+def main(args=None):
+    rclpy.init(args=args)
+    node = ControllerNode()
+    try:
+        rclpy.spin(node)
+    finally:
+        node.destroy_node()
+        rclpy.shutdown()
+if __name__ == '__main__':
+    main()
