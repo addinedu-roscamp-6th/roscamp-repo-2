@@ -160,7 +160,7 @@ class RosBridge(Node):
         self.pub_p1_stop    = self.create_publisher(Bool, '/pinky1/stop', 10)
 
         self.pub_p2_kitchen = self.create_publisher(Bool, '/pinky2/go_to_kitchen', 10)
-        self.pub_p2_serving = self.create_publisher(Bool, '/pinky2/go_to_serving', 10)
+               self.pub_p2_serving = self.create_publisher(Bool, '/pinky2/go_to_serving', 10)
         self.pub_p2_charge  = self.create_publisher(Bool, '/pinky2/go_to_charge', 10)
         self.pub_p2_room    = self.create_publisher(Bool, '/pinky2/go_to_room', 10)
         self.pub_p2_recall  = self.create_publisher(Bool, '/pinky2/go_to_recall', 10)
@@ -456,8 +456,14 @@ class GUI(QMainWindow):
         self._known_faces_dir = None
         self._worker = None
         self._face_inflight = False
-               self._face_frame_counter = 0
+        self._face_frame_counter = 0
         self._p3_last_bgr = None
+
+        # ★ 오버레이 유지 상태 (환경변수로 유지 시간 조절 가능)
+        self._face_hold_ms = int(os.getenv("FACE_HOLD_MS", "1500"))  # 기본 1.5초 유지
+        self._overlay_boxes = []     # [(top, right, bottom, left), ...]
+        self._overlay_names = []     # ["Kim", "Unknown", ...]
+        self._overlay_deadline = 0   # ms 단위 타임스탬프
 
         # HTTP MJPEG
         for name, topic in image_topics.items():
@@ -626,7 +632,7 @@ class GUI(QMainWindow):
                 cv2.FONT_HERSHEY_DUPLEX, font_scale, (255, 255, 255), font_thickness
             )
 
-        # ---- (기존) Pinky-3 라벨에 즉시 표시 ----
+        # 즉시 Pinky-3 타일에 표시(즉각 반응)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
@@ -635,16 +641,14 @@ class GUI(QMainWindow):
         if lbl is not None:
             lbl.setPixmap(pix)
 
-        # ---- (추가) 오버레이된 프레임을 JPEG로 인코딩해 캐시에 주입 => 타이머에서도 동일 이미지 재표시 ----
+        # ★ 최근 인식 결과를 일정 시간 유지하기 위해 상태 저장
         try:
-            ok, enc = cv2.imencode('.jpg', bgr)
-            if ok:
-                lock = self._mjpeg_lock.get("Pinky-3")
-                if lock:
-                    with lock:
-                        self._mjpeg_last_jpg["Pinky-3"] = enc.tobytes()
+            now_ms = int(time.time() * 1000)
+            self._overlay_boxes = list(face_locations)  # [(t,r,b,l), ...]
+            self._overlay_names = list(names)
+            self._overlay_deadline = now_ms + self._face_hold_ms
         except Exception as e:
-            self.log_action(f"Pinky-3 오버레이 캐시 주입 실패: {e}")
+            self.log_action(f"Pinky-3 오버레이 상태 저장 실패: {e}")
 
     # ── 타이머 루프
     def _on_timer(self):
@@ -672,6 +676,36 @@ class GUI(QMainWindow):
             if lock:
                 with lock:
                     jpg = self._mjpeg_last_jpg.get(name)
+
+            # ★ Pinky-3: 최근 인식 결과가 유효하면 현재 프레임 위에 고정 오버레이 적용
+            if (name == "Pinky-3" and jpg and
+                int(time.time()*1000) < self._overlay_deadline and
+                self._overlay_boxes and self._overlay_names):
+                try:
+                    npbuf = np.frombuffer(jpg, dtype=np.uint8)
+                    bgr = cv2.imdecode(npbuf, cv2.IMREAD_COLOR)
+                    if bgr is not None:
+                        box_thickness = 3
+                        font_scale = 0.8
+                        font_thickness = 1
+                        for (top, right, bottom, left), nm in zip(self._overlay_boxes, self._overlay_names):
+                            color = (0, 255, 0) if nm != "Unknown" else (0, 0, 255)
+                            cv2.rectangle(bgr, (left, top), (right, bottom), color, box_thickness)
+                            label_h = 30
+                            cv2.rectangle(bgr, (left, bottom - label_h), (right, bottom), color, cv2.FILLED)
+                            cv2.putText(bgr, nm, (left + 6, bottom - 8),
+                                        cv2.FONT_HERSHEY_DUPLEX, font_scale, (255, 255, 255), font_thickness)
+                        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+                        h, w, ch = rgb.shape
+                        qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
+                        pix = QPixmap.fromImage(qimg.scaled(CELL_W, CELL_H, Qt.AspectRatioMode.KeepAspectRatio))
+                        lbl.setPixmap(pix)
+                        continue  # 다음 타일로
+                except Exception as e:
+                    self.log_action(f"Pinky-3 오버레이 렌더 실패: {e}")
+                    # 실패 시 기본 경로로 내려감
+
+            # ↓↓↓ 기본 경로: 원본 JPG 또는 ROS 이미지 표시 ↓↓↓
             if jpg:
                 img = QImage.fromData(jpg)
                 if not img.isNull():
