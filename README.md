@@ -195,11 +195,15 @@ AMR 출발, 복도 장애물 회피
 
 
 시스템 아키택쳐
+
 <img width="554" height="333" alt="image" src="https://github.com/user-attachments/assets/d753a361-3616-44d4-be76-ba9c49962a10" />
 
 
 소프트웨어 아키택쳐
+
 <img width="565" height="455" alt="image" src="https://github.com/user-attachments/assets/3d18aaf2-264a-46ee-93a2-ade9d51dbb34" />
 
 
 2팀 최종ppt자료
+
+https://www.canva.com/design/DAGwwcZThKE/dPqkowkff7g7b0NlkWN0fA/edit?ui=eyJIIjp7IkEiOnRydWV9fQ
