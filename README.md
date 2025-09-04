@@ -9,5 +9,3 @@
 
 ➡인력부담을 줄여 환자 케어에 질을 높이는 식사 물류 자동화 시스템 구현
 
-https://ohjjary.atlassian.net/wiki/spaces/LGCDBOM/overview
-스페이스 주소
