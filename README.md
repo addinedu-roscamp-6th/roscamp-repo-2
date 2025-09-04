@@ -12,5 +12,6 @@
 | 사용언어    | python                                   |
 | ---------- | ---------------------------------------------- |
 | 개발환경    | Visual Studio Code, Ubuntu                |
-| ---------- | ---------------------------------------------- |
+| 로봇 | PINKYBOT, JETCOBOT(Rasberry Pi) |
 | 라이브러리 | Ros 2 (Jazzy), YOLO, PyQt6, OpenCV |
+| 협업 | Git, Jira, Confluence, Slack |
