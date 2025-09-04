@@ -39,7 +39,7 @@
 
 적용 현장: 요양병원 병동·주방·세척실
 
-팀: 1팀 / 기간: 2025.06–2025.08
+팀: 2팀 / 기간: 2025.06–2025.08
 
 
 
@@ -185,7 +185,7 @@ AMR 출발, 복도 장애물 회피
 
 낙상 이벤트 시나리오 트리거(영상 캡처·알림)
 
-101. 안전·규정·프라이버시
+10. 안전·규정·프라이버시
 
 사람 검출 기반 속도 제한·E-Stop
 
@@ -194,9 +194,12 @@ AMR 출발, 복도 장애물 회피
 병동별 통행시간·소음 제한 준수
 
 
-
+시스템 아키택쳐
 <img width="554" height="333" alt="image" src="https://github.com/user-attachments/assets/d753a361-3616-44d4-be76-ba9c49962a10" />
 
 
-
+소프트웨어 아키택쳐
 <img width="565" height="455" alt="image" src="https://github.com/user-attachments/assets/3d18aaf2-264a-46ee-93a2-ade9d51dbb34" />
+
+
+2팀 최종ppt자료
