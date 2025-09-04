@@ -45,4 +45,4 @@
 
 2팀 최종ppt자료
 
-https://www.canva.com/design/DAGwwcZThKE/dPqkowkff7g7b0NlkWN0fA/edit?ui=eyJIIjp7IkEiOnRydWV9fQ
+https://www.canva.com/design/DAGwwcZThKE/8rAlRdWvzK_E87k5Q6WWoA/view?utm_content=DAGwwcZThKE&utm_campaign=designshare&utm_medium=link2&utm_source=uniquelinks&utlId=h05d41f4d84
