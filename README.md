@@ -192,3 +192,9 @@ AMR 출발, 복도 장애물 회피
 카메라 데이터 최소보관, 비식별화
 
 병동별 통행시간·소음 제한 준수
+
+
+
+<img width="554" height="333" alt="image" src="https://github.com/user-attachments/assets/d753a361-3616-44d4-be76-ba9c49962a10" />
+
+
