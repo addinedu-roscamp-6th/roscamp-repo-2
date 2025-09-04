@@ -198,3 +198,5 @@ AMR 출발, 복도 장애물 회피
 <img width="554" height="333" alt="image" src="https://github.com/user-attachments/assets/d753a361-3616-44d4-be76-ba9c49962a10" />
 
 
+
+<img width="565" height="455" alt="image" src="https://github.com/user-attachments/assets/3d18aaf2-264a-46ee-93a2-ade9d51dbb34" />
